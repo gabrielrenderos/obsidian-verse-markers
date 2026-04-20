@@ -687,6 +687,9 @@ function wrapRangeWithSpans(range, className) {
     const t = cur;
     if (!t.nodeValue || t.nodeValue.length === 0)
       continue;
+    const owner = t.parentElement;
+    if (owner && owner.closest("h1, h2, h3, h4, h5, h6"))
+      continue;
     if (!/\S/.test(t.nodeValue))
       continue;
     if (range.intersectsNode(t))

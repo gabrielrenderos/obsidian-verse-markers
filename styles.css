@@ -20,10 +20,16 @@
 
 /* Invisible anchor span used to target part-b/c/… of a heading-split verse. */
 .verse-part-anchor {
-  display: inline-block;
+  position: absolute;
+  display: block;
   width: 0;
   height: 0;
+  margin: 0;
+  padding: 0;
+  line-height: 0;
+  font-size: 0;
   overflow: hidden;
+  pointer-events: none;
 }
 
 /* Hover preview popover.

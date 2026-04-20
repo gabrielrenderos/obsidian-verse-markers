@@ -540,6 +540,10 @@ function wrapRangeWithSpans(range: Range, className: string): HTMLSpanElement[] 
   while ((cur = walker.nextNode())) {
     const t = cur as Text;
     if (!t.nodeValue || t.nodeValue.length === 0) continue;
+    // Never highlight heading text: headings can act as verse split markers,
+    // but their own label text is section structure, not verse body.
+    const owner = t.parentElement;
+    if (owner && owner.closest("h1, h2, h3, h4, h5, h6")) continue;
     // Skip whitespace-only text nodes (typically structural newlines/indent
     // sitting between block elements — e.g. between <blockquote> and its
     // child <p>s). With padding applied, a wrapped whitespace node would
