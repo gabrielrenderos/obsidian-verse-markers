@@ -1,0 +1,10 @@
+{
+  "id": "verse-markers",
+  "name": "Verse Markers",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Inline verse numbering and referencing system for Obsidian notes.",
+  "author": "",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}

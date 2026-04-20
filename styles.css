@@ -1,0 +1,88 @@
+/*
+ * Verse Markers styles.
+ *
+ * Design intent: do NOT introduce custom colors, weights, or sizes. We only
+ * rewrite what Obsidian would otherwise render, then let Obsidian's own
+ * theme variables decide how it looks.
+ *
+ * Live preview is intentionally untouched — the native Obsidian rendering
+ * of `[N]` (a light-gray bracket + accent-color text) already matches the
+ * look we want, so there is no CM6 decoration layer.
+ *
+ * Reading view rewrites `[N]` to a bare number span and colors it with the
+ * native link accent color so it visually matches the editor.
+ */
+
+/* Reading view: the verse number (brackets are dropped entirely). */
+.verse-marker {
+  color: var(--link-color);
+}
+
+/* Invisible anchor span used to target part-b/c/… of a heading-split verse. */
+.verse-part-anchor {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* Hover preview popover.
+ *
+ * We deliberately ship NO custom styling for the popover itself. The DOM
+ * uses Obsidian's own class hierarchy — .popover.hover-popover wrapping
+ * .markdown-embed — so the active theme styles size, padding, borders,
+ * shadow, the corner "open" link, and scroll behavior exactly the same
+ * way it styles Obsidian's native page-preview popover.
+ *
+ * The .verse-hover-preview class is kept purely as an identifier so plugin
+ * code can find these elements; it carries no visual rules. */
+
+/* Post-navigation flash highlight.
+ *
+ * Implemented by wrapping the in-range text nodes in <span class="verse-flash">
+ * elements at navigation time (see flashVerseRange in references.ts). We use
+ * real spans (rather than the CSS Custom Highlight API) so we can give the
+ * tint rounded corners, breathing-room padding, and a fade in/out — none of
+ * which the ::highlight() pseudo-element accepts.
+ *
+ * Color comes from --text-highlight-bg (the variable Obsidian uses for
+ * ==highlight== syntax) so it matches the active theme automatically.
+ *
+ * box-decoration-break: clone makes padding and (the end-cap) rounding wrap
+ * cleanly onto every line of a multi-line highlighted span instead of only
+ * the first and last.
+ *
+ * Negative horizontal margins cancel the horizontal padding so wrapping
+ * the spans in/out doesn't shift surrounding text, and so adjacent spans'
+ * backgrounds overlap and visually merge into one continuous highlight.
+ *
+ * Vertical padding is 0 deliberately: even 1px of inline vertical padding
+ * can visibly extend a blockquote's line-box for the duration of the flash.
+ * Rounding lives only on the outermost spans (.verse-flash-start /
+ * .verse-flash-end), so middle spans merge seamlessly into the block
+ * instead of rendering as an alternating row of chips. */
+.verse-flash {
+  border-radius: 0;
+  padding-top: 0.08em;
+  padding-bottom: 0.08em;
+  margin: 0;
+  background-color: transparent;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  transition: background-color 220ms ease-in-out;
+}
+.verse-flash.verse-flash-start {
+  border-top-left-radius: 0.18em;
+  border-bottom-left-radius: 0.18em;
+  padding-left: 0.1em;
+  margin-left: -0.1em;
+}
+.verse-flash.verse-flash-end {
+  border-top-right-radius: 0.18em;
+  border-bottom-right-radius: 0.18em;
+  padding-right: 0.1em;
+  margin-right: -0.1em;
+}
+.verse-flash-active {
+  background-color: var(--text-highlight-bg);
+}
