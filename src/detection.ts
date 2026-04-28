@@ -178,7 +178,37 @@ export function getVerseRangeRawText(
   }
 
   if (startPos === -1) return null;
-  return text.slice(startPos, contentEnd).trimEnd();
+  const raw = text.slice(startPos, contentEnd).trimEnd();
+  return stripTrailingHeadingsBeforeNextVerse(raw);
+}
+
+/**
+ * Removes ATX headings (and surrounding blank lines) that appear only as a
+ * trailing suffix after the last verse body and before the next verse marker.
+ *
+ * The raw range slice includes everything up to the next `[N]` marker, so a
+ * section heading placed after the final paragraph of verse `end` — but still
+ * before verse `end+1` — would otherwise show in the hover popover even
+ * though it is not part of the verse text (heading lines are excluded from
+ * `getVerseParts` / reading flow for splits).
+ */
+function stripTrailingHeadingsBeforeNextVerse(raw: string): string {
+  const lines = raw.split("\n");
+  let end = lines.length;
+  while (end > 0) {
+    let i = end - 1;
+    while (i >= 0 && /^\s*$/.test(lines[i])) i--;
+    if (i < 0) {
+      end = 0;
+      break;
+    }
+    if (HEADING_LINE_REGEX.test(stripBlockquoteMarker(lines[i]))) {
+      end = i;
+      continue;
+    }
+    break;
+  }
+  return lines.slice(0, end).join("\n").trimEnd();
 }
 
 /**

@@ -115,7 +115,27 @@ function getVerseRangeRawText(text, start, end) {
   }
   if (startPos === -1)
     return null;
-  return text.slice(startPos, contentEnd).trimEnd();
+  const raw = text.slice(startPos, contentEnd).trimEnd();
+  return stripTrailingHeadingsBeforeNextVerse(raw);
+}
+function stripTrailingHeadingsBeforeNextVerse(raw) {
+  const lines = raw.split("\n");
+  let end = lines.length;
+  while (end > 0) {
+    let i = end - 1;
+    while (i >= 0 && /^\s*$/.test(lines[i]))
+      i--;
+    if (i < 0) {
+      end = 0;
+      break;
+    }
+    if (HEADING_LINE_REGEX.test(stripBlockquoteMarker(lines[i]))) {
+      end = i;
+      continue;
+    }
+    break;
+  }
+  return lines.slice(0, end).join("\n").trimEnd();
 }
 function parseVerseRange(fragment, allowShorthand = false) {
   var _a, _b;
