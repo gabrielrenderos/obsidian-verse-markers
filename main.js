@@ -137,6 +137,22 @@ function stripTrailingHeadingsBeforeNextVerse(raw) {
   }
   return lines.slice(0, end).join("\n").trimEnd();
 }
+function findVerseLine(text, verseNumber) {
+  const re = getVerseRegex();
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    const num = parseInt(match[0].slice(1, -1), 10);
+    if (num === verseNumber) {
+      let line = 0;
+      for (let i = 0; i < match.index; i++) {
+        if (text.charCodeAt(i) === 10)
+          line++;
+      }
+      return line;
+    }
+  }
+  return null;
+}
 function parseVerseRange(fragment, allowShorthand = false) {
   var _a, _b;
   const pattern = allowShorthand ? /^(?:verse-)?(\d+)([a-z])?:(\d+)([a-z])?$/ : /^verse-(\d+)([a-z])?:(\d+)([a-z])?$/;
@@ -713,7 +729,7 @@ function wirePopoverContent(plugin, contentEl, ownerNode) {
   return disposers;
 }
 async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
-  var _a;
+  var _a, _b;
   const single = parseVerseSingle(fragment, allowShorthand);
   const range = parseVerseRange(fragment, allowShorthand);
   let startVerse = null;
@@ -736,10 +752,21 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
   const leaf = app.workspace.getMostRecentLeaf();
   if (!leaf)
     return false;
-  await leaf.openFile(file);
+  let openState;
+  const content = await app.vault.cachedRead(file);
+  const targetLine = findVerseLine(content, startVerse);
+  if (targetLine !== null) {
+    openState = { eState: { line: targetLine } };
+  }
+  suppressNativeFlashFor(NATIVE_FLASH_SUPPRESS_MS);
+  await leaf.openFile(file, openState);
+  if (targetLine !== null && leaf.view instanceof import_obsidian2.MarkdownView) {
+    const scrollableView = leaf.view;
+    (_a = scrollableView.applyScroll) == null ? void 0 : _a.call(scrollableView, targetLine);
+  }
   const primaryId = startPart ? `verse-${startVerse}${startPart}` : `verse-${startVerse}`;
   const fallbackId = `verse-${startVerse}`;
-  const anchor = (_a = await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) != null ? _a : document.getElementById(fallbackId);
+  const anchor = (_b = await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) != null ? _b : document.getElementById(fallbackId);
   if (anchor) {
     anchor.scrollIntoView({ behavior: "smooth", block: "center" });
   }
@@ -752,6 +779,58 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
   return true;
 }
 var ANCHOR_WAIT_TIMEOUT_MS = 1500;
+var NATIVE_FLASH_SUPPRESS_MS = 5e3;
+var NATIVE_FLASH_CLASSES = [
+  "is-flashing",
+  "is-flashing-block",
+  "has-active-flash",
+  "is-flash"
+];
+function stripNativeFlashClasses(el) {
+  for (const cls of NATIVE_FLASH_CLASSES) {
+    if (el.classList.contains(cls))
+      el.classList.remove(cls);
+  }
+}
+function suppressNativeFlashFor(durationMs) {
+  const root = document.body;
+  for (const cls of NATIVE_FLASH_CLASSES) {
+    root.querySelectorAll(`.${cls}`).forEach(stripNativeFlashClasses);
+  }
+  const observer = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      if (m.type === "attributes" && m.attributeName === "class") {
+        stripNativeFlashClasses(m.target);
+      } else if (m.type === "childList") {
+        for (const node of Array.from(m.addedNodes)) {
+          if (node.nodeType !== Node.ELEMENT_NODE)
+            continue;
+          const el = node;
+          stripNativeFlashClasses(el);
+          for (const cls of NATIVE_FLASH_CLASSES) {
+            el.querySelectorAll(`.${cls}`).forEach(stripNativeFlashClasses);
+          }
+        }
+      }
+    }
+  });
+  observer.observe(root, {
+    attributes: true,
+    attributeFilter: ["class"],
+    childList: true,
+    subtree: true
+  });
+  let disposed = false;
+  const dispose = () => {
+    if (disposed)
+      return;
+    disposed = true;
+    observer.disconnect();
+    window.clearTimeout(timer);
+  };
+  const timer = window.setTimeout(dispose, durationMs);
+  return dispose;
+}
 function waitForElementById(id, timeoutMs) {
   const existing = document.getElementById(id);
   if (existing)
@@ -900,19 +979,24 @@ function collectInRangeAnchors(startVerse, startPart, endVerse, endPart) {
   }
   return inRange;
 }
-function findHeadingBetween(a, b) {
-  const headings = document.querySelectorAll(
-    "h1, h2, h3, h4, h5, h6"
-  );
-  for (let i = 0; i < headings.length; i++) {
-    const h = headings[i];
-    if (!(a.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+var FLASH_STOP_FOOTNOTE_SELECTORS = [
+  "section.footnotes",
+  ".footnotes",
+  "ol.footnote-list"
+];
+var FLASH_STOP_HEADING_SELECTORS = ["h1", "h2", "h3", "h4", "h5", "h6"];
+function findFlashStopBetween(a, b, includeHeadings) {
+  const selectors = includeHeadings ? [...FLASH_STOP_FOOTNOTE_SELECTORS, ...FLASH_STOP_HEADING_SELECTORS] : FLASH_STOP_FOOTNOTE_SELECTORS;
+  const candidates = document.querySelectorAll(selectors.join(","));
+  for (let i = 0; i < candidates.length; i++) {
+    const el = candidates[i];
+    if (!(a.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) {
       continue;
     }
-    if (b && !(h.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+    if (b && !(el.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)) {
       continue;
     }
-    return h;
+    return el;
   }
   return null;
 }
@@ -932,30 +1016,20 @@ function buildVerseTextRanges(startVerse, startPart, endVerse, endPart) {
     const idx = allValidAnchors.indexOf(anchor);
     const next = idx >= 0 ? allValidAnchors[idx + 1] : void 0;
     const nextInSelection = next !== void 0 && inRangeSet.has(next);
+    const includeHeadings = !nextInSelection;
     const range = document.createRange();
     try {
       range.setStartBefore(anchor);
-      if (next) {
-        if (!nextInSelection) {
-          const heading = findHeadingBetween(anchor, next);
-          if (heading) {
-            range.setEndBefore(heading);
-          } else {
-            range.setEndBefore(next);
-          }
-        } else {
-          range.setEndBefore(next);
-        }
+      const stop = findFlashStopBetween(anchor, next != null ? next : null, includeHeadings);
+      if (stop) {
+        range.setEndBefore(stop);
+      } else if (next) {
+        range.setEndBefore(next);
       } else {
-        const heading = findHeadingBetween(anchor, null);
-        if (heading) {
-          range.setEndBefore(heading);
-        } else {
-          const last = document.body.lastChild;
-          if (!last)
-            continue;
-          range.setEndAfter(last);
-        }
+        const last = document.body.lastChild;
+        if (!last)
+          continue;
+        range.setEndAfter(last);
       }
       ranges.push(range);
     } catch (e) {

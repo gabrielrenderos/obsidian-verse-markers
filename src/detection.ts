@@ -212,6 +212,33 @@ function stripTrailingHeadingsBeforeNextVerse(raw: string): string {
 }
 
 /**
+ * Returns the 0-indexed source line containing the marker for `verseNumber`,
+ * or null if the verse is not present.
+ *
+ * Used to pre-scroll the reading view to a far-off verse so Obsidian's
+ * virtualized renderer mounts the surrounding block (and our verse-N
+ * anchor) before we try to scroll/flash it.
+ */
+export function findVerseLine(
+  text: string,
+  verseNumber: number
+): number | null {
+  const re = getVerseRegex();
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    const num = parseInt(match[0].slice(1, -1), 10);
+    if (num === verseNumber) {
+      let line = 0;
+      for (let i = 0; i < match.index; i++) {
+        if (text.charCodeAt(i) === 10) line++;
+      }
+      return line;
+    }
+  }
+  return null;
+}
+
+/**
  * Returns the number of heading-delimited parts for a given verse.
  * Returns 0 if the verse is not found.
  */

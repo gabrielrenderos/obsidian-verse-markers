@@ -92,3 +92,11 @@
 .verse-flash-active {
   background-color: var(--text-highlight-bg);
 }
+
+/* Note: Obsidian's native scroll-flash is suppressed at the JS layer
+ * (suppressNativeFlashFor in references.ts). That approach actively
+ * strips the native flash class the moment Obsidian applies it, so we
+ * don't need a CSS override here. CSS-only suppression couldn't
+ * distinguish between "navigation was triggered by our plugin" and
+ * "navigation was triggered by Obsidian elsewhere", so we'd lose the
+ * native flash for backlinks/search results too — undesirable. */

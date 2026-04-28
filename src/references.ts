@@ -15,8 +15,16 @@
  * and shows an "Unable to find" error when it fails.
  */
 
-import { App, Component, MarkdownRenderer, TFile, setIcon } from "obsidian";
 import {
+  App,
+  Component,
+  MarkdownRenderer,
+  MarkdownView,
+  TFile,
+  setIcon,
+} from "obsidian";
+import {
+  findVerseLine,
   getVerseContent,
   getVerseParts,
   getVerseRangeRawText,
@@ -612,7 +620,43 @@ export async function resolveVerseLink(
   const leaf = app.workspace.getMostRecentLeaf();
   if (!leaf) return false;
 
-  await leaf.openFile(file);
+  // Pre-compute the verse's source line so we can ask Obsidian to scroll
+  // there directly. Obsidian's reading view virtualizes far-off content —
+  // only blocks near the viewport are mounted in the DOM, so a `verse-N`
+  // anchor for a verse far from the current scroll position literally
+  // doesn't exist yet. Passing `eState: { line }` to openFile uses the
+  // same mechanism Obsidian itself uses for `[[note#heading]]`
+  // navigation, which means it works cross-platform (incl. iOS/iPadOS)
+  // where direct applyScroll() calls don't always take effect.
+  let openState: { eState?: { line: number } } | undefined;
+  const content = await app.vault.cachedRead(file);
+  const targetLine = findVerseLine(content, startVerse);
+  if (targetLine !== null) {
+    openState = { eState: { line: targetLine } };
+  }
+
+  // Suppress Obsidian's native scroll-flash for the duration of this
+  // navigation. eState: { line } both scrolls the preview AND triggers
+  // Obsidian's own block-flash on the target — which visibly overlaps
+  // with our custom verse-range flash. The observer actively strips the
+  // native flash classes the moment Obsidian tries to apply them, and
+  // is scoped to this navigation only so unrelated native flashes still
+  // fire normally.
+  suppressNativeFlashFor(NATIVE_FLASH_SUPPRESS_MS);
+
+  await leaf.openFile(file, openState);
+
+  // Belt-and-suspenders for the same-file case: openFile may resolve
+  // before eState scrolling completes, and on some platforms eState is
+  // ignored when the file is already open. Calling applyScroll directly
+  // forces the active sub-view to render the verse's region in those
+  // edge cases. (Method exists at runtime but isn't in the public types.)
+  if (targetLine !== null && leaf.view instanceof MarkdownView) {
+    const scrollableView = leaf.view as unknown as {
+      applyScroll?: (scroll: number) => void;
+    };
+    scrollableView.applyScroll?.(targetLine);
+  }
 
   // Wait for the verse anchor to actually exist in the rendered DOM
   // instead of guessing with a fixed timeout. The reading view's markdown
@@ -647,6 +691,96 @@ export async function resolveVerseLink(
  * notes; on desktop we usually return in well under 50ms.
  */
 const ANCHOR_WAIT_TIMEOUT_MS = 1500;
+
+/**
+ * How long the native scroll-flash suppression stays armed during a verse
+ * navigation. Generous: covers slow mobile renders where Obsidian adds the
+ * flash class some time after openFile resolves (the class can be applied
+ * once the target chunk finally renders, which on a long iCloud-synced
+ * note may be well after our own flash starts). Outside this window
+ * unrelated native flashes (e.g. backlinks panel) behave normally.
+ */
+const NATIVE_FLASH_SUPPRESS_MS = 5000;
+
+/**
+ * Class names Obsidian adds to elements when it paints its scroll-flash.
+ * `is-flashing` is the canonical one; the others are belt-and-suspenders
+ * for theme/version variants we've seen in the wild.
+ */
+const NATIVE_FLASH_CLASSES = [
+  "is-flashing",
+  "is-flashing-block",
+  "has-active-flash",
+  "is-flash",
+];
+
+function stripNativeFlashClasses(el: Element): void {
+  for (const cls of NATIVE_FLASH_CLASSES) {
+    if (el.classList.contains(cls)) el.classList.remove(cls);
+  }
+}
+
+/**
+ * Actively suppresses Obsidian's native scroll-flash for `durationMs`.
+ *
+ * A MutationObserver watches document.body for any element gaining one
+ * of the native flash class names (or being inserted with one) and
+ * removes the class before the browser paints. This is more reliable
+ * than a CSS-only override because:
+ *   1. It works even if Obsidian's class names change in a future
+ *      version (we check a small allowlist; easy to extend).
+ *   2. It strips the class outright, so even if the suppression window
+ *      ends mid-animation the flash cannot resume.
+ *   3. It only runs while WE triggered the navigation — native flashes
+ *      from unrelated sources (backlink jumps, search results, normal
+ *      heading links, etc.) fire as Obsidian intends.
+ *
+ * Returns a disposer in case a follow-up navigation needs to disarm
+ * early; otherwise the timer disconnects automatically.
+ */
+function suppressNativeFlashFor(durationMs: number): () => void {
+  const root = document.body;
+
+  // Strip anything already flagged before we started — covers the rare
+  // case where the previous navigation's flash hasn't decayed yet.
+  for (const cls of NATIVE_FLASH_CLASSES) {
+    root.querySelectorAll(`.${cls}`).forEach(stripNativeFlashClasses);
+  }
+
+  const observer = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      if (m.type === "attributes" && m.attributeName === "class") {
+        stripNativeFlashClasses(m.target as Element);
+      } else if (m.type === "childList") {
+        for (const node of Array.from(m.addedNodes)) {
+          if (node.nodeType !== Node.ELEMENT_NODE) continue;
+          const el = node as Element;
+          stripNativeFlashClasses(el);
+          for (const cls of NATIVE_FLASH_CLASSES) {
+            el.querySelectorAll(`.${cls}`).forEach(stripNativeFlashClasses);
+          }
+        }
+      }
+    }
+  });
+
+  observer.observe(root, {
+    attributes: true,
+    attributeFilter: ["class"],
+    childList: true,
+    subtree: true,
+  });
+
+  let disposed = false;
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    observer.disconnect();
+    window.clearTimeout(timer);
+  };
+  const timer = window.setTimeout(dispose, durationMs);
+  return dispose;
+}
 
 /**
  * Resolves with the element matching `id` as soon as it exists in the
@@ -864,24 +998,59 @@ function collectInRangeAnchors(
 }
 
 /**
- * Returns the first H1–H6 element that sits after `a` and (if given) before
- * `b` in document order. Used to clamp the trailing edge of a flash range
- * so that a section heading isn't highlighted along with the last selected
- * verse when the selection doesn't continue into the next section.
+ * Selectors for elements that should always stop a flash range, regardless
+ * of whether the selection continues into the next verse. Footnote sections
+ * (rendered at the bottom of a note) must never be highlighted along with
+ * the last verse when the verse is the final entry before the footnotes.
+ *
+ * Different Obsidian versions / themes name the wrapper differently, so
+ * the list is intentionally broad.
  */
-function findHeadingBetween(a: Element, b: Element | null): Element | null {
-  const headings = document.querySelectorAll<HTMLElement>(
-    "h1, h2, h3, h4, h5, h6"
-  );
-  for (let i = 0; i < headings.length; i++) {
-    const h = headings[i];
-    if (!(a.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+const FLASH_STOP_FOOTNOTE_SELECTORS = [
+  "section.footnotes",
+  ".footnotes",
+  "ol.footnote-list",
+];
+
+/**
+ * Selectors for ATX heading elements. Treated as a flash stop only when
+ * the next verse anchor is NOT in the selection — this keeps headings
+ * INSIDE the highlight when the selection continues into a heading-split
+ * sub-part (verse-Nb, verse-Nc, …).
+ */
+const FLASH_STOP_HEADING_SELECTORS = ["h1", "h2", "h3", "h4", "h5", "h6"];
+
+/**
+ * Returns the first stop element (heading and/or footnote section) that
+ * sits after `a` and, if given, before `b` in document order. Returns
+ * null when no candidate exists in that range.
+ *
+ * Footnotes are always candidates. Headings are candidates only when
+ * `includeHeadings` is true — typically when this anchor's range does
+ * NOT continue into the next verse (a section heading immediately
+ * preceding an unrelated next verse must not bleed into the highlight).
+ *
+ * `querySelectorAll` already returns matches in document order, so the
+ * first one that satisfies the bounds is the earliest stop.
+ */
+function findFlashStopBetween(
+  a: Element,
+  b: Element | null,
+  includeHeadings: boolean
+): Element | null {
+  const selectors = includeHeadings
+    ? [...FLASH_STOP_FOOTNOTE_SELECTORS, ...FLASH_STOP_HEADING_SELECTORS]
+    : FLASH_STOP_FOOTNOTE_SELECTORS;
+  const candidates = document.querySelectorAll<HTMLElement>(selectors.join(","));
+  for (let i = 0; i < candidates.length; i++) {
+    const el = candidates[i];
+    if (!(a.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) {
       continue;
     }
-    if (b && !(h.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+    if (b && !(el.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)) {
       continue;
     }
-    return h;
+    return el;
   }
   return null;
 }
@@ -925,32 +1094,25 @@ function buildVerseTextRanges(
     const next = idx >= 0 ? allValidAnchors[idx + 1] : undefined;
     const nextInSelection = next !== undefined && inRangeSet.has(next);
 
+    // Headings act as a stop only when the selection does NOT continue
+    // into the next anchor (i.e. this is the trailing edge). When it
+    // does continue (heading-split parts), headings stay inside the
+    // highlight. Footnotes are always a stop.
+    const includeHeadings = !nextInSelection;
+
     const range = document.createRange();
     try {
       range.setStartBefore(anchor);
-      if (next) {
-        if (!nextInSelection) {
-          const heading = findHeadingBetween(anchor, next);
-          if (heading) {
-            range.setEndBefore(heading);
-          } else {
-            range.setEndBefore(next);
-          }
-        } else {
-          range.setEndBefore(next);
-        }
+      const stop = findFlashStopBetween(anchor, next ?? null, includeHeadings);
+      if (stop) {
+        range.setEndBefore(stop);
+      } else if (next) {
+        range.setEndBefore(next);
       } else {
-        // No next anchor — extend through the end of the document body,
-        // but still clamp before any trailing heading so a final section
-        // header isn't highlighted.
-        const heading = findHeadingBetween(anchor, null);
-        if (heading) {
-          range.setEndBefore(heading);
-        } else {
-          const last = document.body.lastChild;
-          if (!last) continue;
-          range.setEndAfter(last);
-        }
+        // No next anchor and no stop — extend through end of body.
+        const last = document.body.lastChild;
+        if (!last) continue;
+        range.setEndAfter(last);
       }
       ranges.push(range);
     } catch {
