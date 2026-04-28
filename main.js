@@ -713,6 +713,7 @@ function wirePopoverContent(plugin, contentEl, ownerNode) {
   return disposers;
 }
 async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
+  var _a;
   const single = parseVerseSingle(fragment, allowShorthand);
   const range = parseVerseRange(fragment, allowShorthand);
   let startVerse = null;
@@ -736,22 +737,45 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
   if (!leaf)
     return false;
   await leaf.openFile(file);
-  setTimeout(() => {
-    var _a;
-    const primaryId = startPart ? `verse-${startVerse}${startPart}` : `verse-${startVerse}`;
-    const fallbackId = `verse-${startVerse}`;
-    const anchor = (_a = document.getElementById(primaryId)) != null ? _a : document.getElementById(fallbackId);
-    if (anchor) {
-      anchor.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
-    flashVerseRange(
-      startVerse,
-      startPart,
-      endVerse,
-      endPart
-    );
-  }, 150);
+  const primaryId = startPart ? `verse-${startVerse}${startPart}` : `verse-${startVerse}`;
+  const fallbackId = `verse-${startVerse}`;
+  const anchor = (_a = await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) != null ? _a : document.getElementById(fallbackId);
+  if (anchor) {
+    anchor.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+  flashVerseRange(
+    startVerse,
+    startPart,
+    endVerse,
+    endPart
+  );
   return true;
+}
+var ANCHOR_WAIT_TIMEOUT_MS = 1500;
+function waitForElementById(id, timeoutMs) {
+  const existing = document.getElementById(id);
+  if (existing)
+    return Promise.resolve(existing);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (el) => {
+      if (settled)
+        return;
+      settled = true;
+      observer.disconnect();
+      window.clearTimeout(timer);
+      resolve(el);
+    };
+    const observer = new MutationObserver(() => {
+      const el = document.getElementById(id);
+      if (el)
+        finish(el);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    const timer = window.setTimeout(() => {
+      finish(document.getElementById(id));
+    }, timeoutMs);
+  });
 }
 var FLASH_FADE_MS = 220;
 var FLASH_HOLD_MS = 2e3;
@@ -1057,6 +1081,7 @@ var VerseMarkersPlugin = class extends import_obsidian4.Plugin {
         if (!(file instanceof import_obsidian4.TFile))
           return;
         ev.preventDefault();
+        ev.stopPropagation();
         await resolveVerseLink(this.app, file, fragment, allowShorthand);
       };
       a.addEventListener("click", onClick);

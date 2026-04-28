@@ -106,10 +106,14 @@ export default class VerseMarkersPlugin extends Plugin {
 
       // Click: resolve verse fragments ourselves so scrolling works even
       // when Obsidian's heading resolver doesn't know about verse-N.
+      // stopPropagation prevents Obsidian's document-level link handler
+      // from also opening the link with its default scroll-to-heading
+      // logic — on mobile that race could overwrite our scroll target.
       const onClick = async (ev: MouseEvent): Promise<void> => {
         const file = this.app.metadataCache.getFirstLinkpathDest(filePart, "");
         if (!(file instanceof TFile)) return;
         ev.preventDefault();
+        ev.stopPropagation();
         await resolveVerseLink(this.app, file, fragment, allowShorthand);
       };
       a.addEventListener("click", onClick);

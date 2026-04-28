@@ -614,26 +614,76 @@ export async function resolveVerseLink(
 
   await leaf.openFile(file);
 
-  // Short delay so the reading-view render has a chance to populate anchors.
-  setTimeout(() => {
-    const primaryId = startPart
-      ? `verse-${startVerse}${startPart}`
-      : `verse-${startVerse}`;
-    const fallbackId = `verse-${startVerse}`;
-    const anchor =
-      document.getElementById(primaryId) ?? document.getElementById(fallbackId);
-    if (anchor) {
-      anchor.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
-    flashVerseRange(
-      startVerse as number,
-      startPart,
-      endVerse as number,
-      endPart
-    );
-  }, 150);
+  // Wait for the verse anchor to actually exist in the rendered DOM
+  // instead of guessing with a fixed timeout. The reading view's markdown
+  // postprocessor runs asynchronously after openFile() resolves, and the
+  // delay varies per platform — desktop is typically <50ms, but mobile
+  // (iOS/iPadOS) can take several hundred ms on larger notes. A
+  // MutationObserver lets us run as soon as the anchor exists while still
+  // capping the total wait so we don't hang forever on a missing verse.
+  const primaryId = startPart
+    ? `verse-${startVerse}${startPart}`
+    : `verse-${startVerse}`;
+  const fallbackId = `verse-${startVerse}`;
+  const anchor =
+    (await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) ??
+    document.getElementById(fallbackId);
+  if (anchor) {
+    anchor.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+  flashVerseRange(
+    startVerse as number,
+    startPart,
+    endVerse as number,
+    endPart
+  );
 
   return true;
+}
+
+/**
+ * Maximum time we'll keep watching for a verse anchor to appear after
+ * navigation. 1500ms comfortably covers slow mobile renders on large
+ * notes; on desktop we usually return in well under 50ms.
+ */
+const ANCHOR_WAIT_TIMEOUT_MS = 1500;
+
+/**
+ * Resolves with the element matching `id` as soon as it exists in the
+ * document, or null if `timeoutMs` elapses without it appearing.
+ *
+ * Uses a MutationObserver scoped to document.body so we react the moment
+ * the reading view's postprocessor injects our verse anchors. Falls back
+ * to a one-shot poll on timeout in case the element appeared between the
+ * initial check and observer setup (very rare race).
+ */
+function waitForElementById(
+  id: string,
+  timeoutMs: number
+): Promise<HTMLElement | null> {
+  const existing = document.getElementById(id);
+  if (existing) return Promise.resolve(existing);
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (el: HTMLElement | null): void => {
+      if (settled) return;
+      settled = true;
+      observer.disconnect();
+      window.clearTimeout(timer);
+      resolve(el);
+    };
+
+    const observer = new MutationObserver(() => {
+      const el = document.getElementById(id);
+      if (el) finish(el);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    const timer = window.setTimeout(() => {
+      finish(document.getElementById(id));
+    }, timeoutMs);
+  });
 }
 
 /**
