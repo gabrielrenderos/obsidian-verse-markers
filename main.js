@@ -752,23 +752,29 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
   const leaf = app.workspace.getMostRecentLeaf();
   if (!leaf)
     return false;
-  let openState;
   const content = await app.vault.cachedRead(file);
   const targetLine = findVerseLine(content, startVerse);
-  if (targetLine !== null) {
-    openState = { eState: { line: targetLine } };
+  const primaryId = startPart ? `verse-${startVerse}${startPart}` : `verse-${startVerse}`;
+  const fallbackId = `verse-${startVerse}`;
+  const sameFileOpen = leaf.view instanceof import_obsidian2.MarkdownView && leaf.view.file === file;
+  const anchorAlreadyMounted = sameFileOpen && (document.getElementById(primaryId) !== null || document.getElementById(fallbackId) !== null);
+  const needForcedScroll = !anchorAlreadyMounted && targetLine !== null;
+  const openState = needForcedScroll ? { eState: { line: targetLine } } : void 0;
+  if (needForcedScroll) {
+    suppressNativeFlashFor(NATIVE_FLASH_SUPPRESS_MS);
   }
-  suppressNativeFlashFor(NATIVE_FLASH_SUPPRESS_MS);
   await leaf.openFile(file, openState);
-  if (targetLine !== null && leaf.view instanceof import_obsidian2.MarkdownView) {
+  if (needForcedScroll && targetLine !== null && leaf.view instanceof import_obsidian2.MarkdownView) {
     const scrollableView = leaf.view;
     (_a = scrollableView.applyScroll) == null ? void 0 : _a.call(scrollableView, targetLine);
   }
-  const primaryId = startPart ? `verse-${startVerse}${startPart}` : `verse-${startVerse}`;
-  const fallbackId = `verse-${startVerse}`;
   const anchor = (_b = await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) != null ? _b : document.getElementById(fallbackId);
   if (anchor) {
-    anchor.scrollIntoView({ behavior: "smooth", block: "center" });
+    requestAnimationFrame(() => {
+      if (document.body.contains(anchor)) {
+        smoothScrollAnchorToCenter(anchor);
+      }
+    });
   }
   flashVerseRange(
     startVerse,
@@ -779,6 +785,34 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
   return true;
 }
 var ANCHOR_WAIT_TIMEOUT_MS = 1500;
+function findScrollAncestor(el) {
+  let parent = el.parentElement;
+  while (parent) {
+    const style = getComputedStyle(parent);
+    const overflowY = style.overflowY;
+    const scrollable = overflowY === "auto" || overflowY === "scroll";
+    if (scrollable && parent.scrollHeight > parent.clientHeight) {
+      return parent;
+    }
+    parent = parent.parentElement;
+  }
+  return null;
+}
+function smoothScrollAnchorToCenter(anchor) {
+  const container = findScrollAncestor(anchor);
+  const anchorRect = anchor.getBoundingClientRect();
+  if (!container) {
+    window.scrollTo({ top: window.scrollY, behavior: "auto" });
+    const target2 = window.scrollY + anchorRect.top + anchorRect.height / 2 - window.innerHeight / 2;
+    window.scrollTo({ top: target2, behavior: "smooth" });
+    return;
+  }
+  container.scrollTo({ top: container.scrollTop, behavior: "auto" });
+  const containerRect = container.getBoundingClientRect();
+  const relTop = anchorRect.top - containerRect.top;
+  const target = container.scrollTop + relTop + anchorRect.height / 2 - container.clientHeight / 2;
+  container.scrollTo({ top: target, behavior: "smooth" });
+}
 var NATIVE_FLASH_SUPPRESS_MS = 5e3;
 var NATIVE_FLASH_CLASSES = [
   "is-flashing",

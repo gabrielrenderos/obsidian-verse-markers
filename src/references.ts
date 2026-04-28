@@ -620,20 +620,38 @@ export async function resolveVerseLink(
   const leaf = app.workspace.getMostRecentLeaf();
   if (!leaf) return false;
 
-  // Pre-compute the verse's source line so we can ask Obsidian to scroll
-  // there directly. Obsidian's reading view virtualizes far-off content —
-  // only blocks near the viewport are mounted in the DOM, so a `verse-N`
-  // anchor for a verse far from the current scroll position literally
-  // doesn't exist yet. Passing `eState: { line }` to openFile uses the
-  // same mechanism Obsidian itself uses for `[[note#heading]]`
-  // navigation, which means it works cross-platform (incl. iOS/iPadOS)
-  // where direct applyScroll() calls don't always take effect.
-  let openState: { eState?: { line: number } } | undefined;
+  // Pre-compute the verse's source line and anchor IDs once so we can
+  // decide whether eState's forced scroll is even needed.
   const content = await app.vault.cachedRead(file);
   const targetLine = findVerseLine(content, startVerse);
-  if (targetLine !== null) {
-    openState = { eState: { line: targetLine } };
-  }
+  const primaryId = startPart
+    ? `verse-${startVerse}${startPart}`
+    : `verse-${startVerse}`;
+  const fallbackId = `verse-${startVerse}`;
+
+  // Decide whether to ask Obsidian to pre-scroll via eState. eState is
+  // necessary when the verse anchor isn't currently rendered (Obsidian's
+  // reading view virtualizes far-off chunks; without forcing a render,
+  // the anchor never exists). But it has a side effect: eState parks
+  // the verse at the TOP of the viewport, then our scrollIntoView would
+  // need a second pass to re-center — visibly jarring in fast cases
+  // where the anchor was already on screen.
+  //
+  // So: skip eState (and its sibling applyScroll forced render) when we
+  // already have the anchor in the DOM. This gives the smooth direct-
+  // to-center motion in the fast path while still supporting cold loads
+  // and far-off mobile virtualized targets.
+  const sameFileOpen =
+    leaf.view instanceof MarkdownView && leaf.view.file === file;
+  const anchorAlreadyMounted =
+    sameFileOpen &&
+    (document.getElementById(primaryId) !== null ||
+      document.getElementById(fallbackId) !== null);
+  const needForcedScroll = !anchorAlreadyMounted && targetLine !== null;
+
+  const openState: { eState?: { line: number } } | undefined = needForcedScroll
+    ? { eState: { line: targetLine as number } }
+    : undefined;
 
   // Suppress Obsidian's native scroll-flash for the duration of this
   // navigation. eState: { line } both scrolls the preview AND triggers
@@ -641,17 +659,24 @@ export async function resolveVerseLink(
   // with our custom verse-range flash. The observer actively strips the
   // native flash classes the moment Obsidian tries to apply them, and
   // is scoped to this navigation only so unrelated native flashes still
-  // fire normally.
-  suppressNativeFlashFor(NATIVE_FLASH_SUPPRESS_MS);
+  // fire normally. Only armed when eState is actually used, since
+  // Obsidian's flash is what eState triggers.
+  if (needForcedScroll) {
+    suppressNativeFlashFor(NATIVE_FLASH_SUPPRESS_MS);
+  }
 
   await leaf.openFile(file, openState);
 
-  // Belt-and-suspenders for the same-file case: openFile may resolve
-  // before eState scrolling completes, and on some platforms eState is
-  // ignored when the file is already open. Calling applyScroll directly
-  // forces the active sub-view to render the verse's region in those
-  // edge cases. (Method exists at runtime but isn't in the public types.)
-  if (targetLine !== null && leaf.view instanceof MarkdownView) {
+  // Belt-and-suspenders applyScroll only on the cold path. We need it
+  // there for the same-file case where openFile may not re-apply eState
+  // because the file was already open. On the warm path (anchor already
+  // mounted) calling applyScroll would re-park the verse at the top and
+  // cancel the "smooth direct-to-center" feel of the warm navigation.
+  if (
+    needForcedScroll &&
+    targetLine !== null &&
+    leaf.view instanceof MarkdownView
+  ) {
     const scrollableView = leaf.view as unknown as {
       applyScroll?: (scroll: number) => void;
     };
@@ -665,15 +690,40 @@ export async function resolveVerseLink(
   // (iOS/iPadOS) can take several hundred ms on larger notes. A
   // MutationObserver lets us run as soon as the anchor exists while still
   // capping the total wait so we don't hang forever on a missing verse.
-  const primaryId = startPart
-    ? `verse-${startVerse}${startPart}`
-    : `verse-${startVerse}`;
-  const fallbackId = `verse-${startVerse}`;
   const anchor =
     (await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) ??
     document.getElementById(fallbackId);
   if (anchor) {
-    anchor.scrollIntoView({ behavior: "smooth", block: "center" });
+    // We deliberately avoid Element.scrollIntoView({block: "center"}). Two
+    // problems made it unreliable in our setup:
+    //
+    //   1. It SHORT-CIRCUITS when the browser already considers the
+    //      element "sufficiently visible". WebKit (iOS/iPadOS) is
+    //      especially aggressive: after Obsidian's eState parks the
+    //      verse at the top of the viewport, scrollIntoView({center})
+    //      sometimes does nothing because the element is technically
+    //      visible — and the verse stays at the top.
+    //
+    //   2. It LOSES RACES to async scroll commands fired by Obsidian
+    //      (e.g. eState's smooth scroll, which can land after openFile
+    //      resolves). The browser treats the latest scroll call as
+    //      authoritative, but it's hard to guarantee ours runs last.
+    //
+    // smoothScrollAnchorToCenter computes the target offset and uses
+    // scrollTo, which never short-circuits. It also cancels any
+    // in-flight smooth scroll before issuing ours so it can't be
+    // overwritten.
+    //
+    // We wait one animation frame before scrolling so any rAF-scheduled
+    // scroll command from eState (Obsidian commonly queues its scroll
+    // for the next frame after openFile resolves) has already committed.
+    // After that frame, our cancel-then-scroll sequence is guaranteed
+    // to be the last writer and wins deterministically.
+    requestAnimationFrame(() => {
+      if (document.body.contains(anchor)) {
+        smoothScrollAnchorToCenter(anchor);
+      }
+    });
   }
   flashVerseRange(
     startVerse as number,
@@ -691,6 +741,88 @@ export async function resolveVerseLink(
  * notes; on desktop we usually return in well under 50ms.
  */
 const ANCHOR_WAIT_TIMEOUT_MS = 1500;
+
+/**
+ * Walks up from `el` looking for the nearest scrollable ancestor —
+ * the element whose own scrollbar would actually move when you scroll
+ * inside `el`. Returns null if the element scrolls with the document
+ * itself (in which case the caller should use window.scrollTo).
+ *
+ * We need this because Obsidian's reading view scrolls inside a
+ * dedicated container (`.markdown-preview-view`), not the document.
+ * Calling window.scrollTo there would do nothing.
+ */
+function findScrollAncestor(el: Element): HTMLElement | null {
+  let parent = el.parentElement;
+  while (parent) {
+    const style = getComputedStyle(parent);
+    const overflowY = style.overflowY;
+    const scrollable = overflowY === "auto" || overflowY === "scroll";
+    if (scrollable && parent.scrollHeight > parent.clientHeight) {
+      return parent;
+    }
+    parent = parent.parentElement;
+  }
+  return null;
+}
+
+/**
+ * Smoothly scrolls so that `anchor` lands vertically centered in its
+ * scroll container. We deliberately compute the target offset and call
+ * scrollTo ourselves instead of using Element.scrollIntoView({block:
+ * "center"}) because:
+ *
+ *   1. scrollIntoView short-circuits when the browser already considers
+ *      the element "sufficiently visible" — particularly in WebKit,
+ *      this happens after eState has just parked the verse at the top
+ *      of the viewport, leaving us stuck at the top.
+ *   2. scrollIntoView competes badly with other in-flight scroll
+ *      animations (Obsidian's eState fires asynchronously after
+ *      openFile resolves); the latest scroll command wins, and we
+ *      can't always guarantee ours runs last.
+ *
+ * scrollTo with an explicit pixel target has neither problem: it
+ * always moves to that exact offset, and being a fresh smooth scroll
+ * request it cleanly overrides any in-flight animation.
+ */
+function smoothScrollAnchorToCenter(anchor: HTMLElement): void {
+  const container = findScrollAncestor(anchor);
+  const anchorRect = anchor.getBoundingClientRect();
+
+  if (!container) {
+    // Cancel any in-flight smooth scroll on the document before issuing
+    // ours. Without this, an Obsidian eState scroll fired right before
+    // us (or scheduled during openFile but not yet committed) will land
+    // after we do and clobber our centering. `behavior: "auto"` is
+    // instant per CSSOM spec and interrupts any pending smooth scroll.
+    window.scrollTo({ top: window.scrollY, behavior: "auto" });
+
+    const target =
+      window.scrollY +
+      anchorRect.top +
+      anchorRect.height / 2 -
+      window.innerHeight / 2;
+    window.scrollTo({ top: target, behavior: "smooth" });
+    return;
+  }
+
+  // Same race-prevention trick on the scroll container. This is the
+  // critical fix for the "verse parks at top, then 400ms later jumps
+  // to center" symptom: that wait was caused by eState's deferred
+  // smooth scroll winning the race against ours. Cancelling it here
+  // means our smooth scroll always animates straight from the current
+  // position to centered, with no parking step.
+  container.scrollTo({ top: container.scrollTop, behavior: "auto" });
+
+  const containerRect = container.getBoundingClientRect();
+  const relTop = anchorRect.top - containerRect.top;
+  const target =
+    container.scrollTop +
+    relTop +
+    anchorRect.height / 2 -
+    container.clientHeight / 2;
+  container.scrollTo({ top: target, behavior: "smooth" });
+}
 
 /**
  * How long the native scroll-flash suppression stays armed during a verse
