@@ -400,6 +400,27 @@ function registerCommands(plugin) {
 
 // src/references.ts
 var import_obsidian2 = require("obsidian");
+var MAX_POPOVER_DEPTH = 16;
+var popoverNodes = /* @__PURE__ */ new WeakMap();
+function findEnclosingPopoverNode(node) {
+  let cur = node;
+  while (cur) {
+    if (cur.nodeType === Node.ELEMENT_NODE && cur.classList.contains("verse-hover-preview")) {
+      const found = popoverNodes.get(cur);
+      if (found)
+        return found;
+    }
+    cur = cur.parentNode;
+  }
+  return null;
+}
+function cancelHideUpChain(node) {
+  let cur = node;
+  while (cur) {
+    cur.cancelHide();
+    cur = cur.parent;
+  }
+}
 function partToIndex(part) {
   return part.charCodeAt(0) - "a".charCodeAt(0);
 }
@@ -481,7 +502,7 @@ function positionPopover(popover, anchor) {
   popover.style.top = `${top}px`;
 }
 function attachVerseHoverPreview(plugin, anchorEl, linkText) {
-  let popoverEl = null;
+  let node = null;
   let popoverComponent = null;
   let hideTimer = null;
   let showToken = 0;
@@ -491,27 +512,42 @@ function attachVerseHoverPreview(plugin, anchorEl, linkText) {
       hideTimer = null;
     }
   };
+  const scheduleHide = () => {
+    cancelHide();
+    if (node && node.children.size > 0)
+      return;
+    hideTimer = window.setTimeout(hide, HIDE_DELAY_MS);
+  };
   const hide = () => {
     cancelHide();
     showToken++;
+    if (node) {
+      const children = Array.from(node.children);
+      for (const c of children)
+        c.hide();
+    }
     if (popoverComponent) {
       popoverComponent.unload();
       popoverComponent = null;
     }
-    if (popoverEl && popoverEl.parentNode) {
-      popoverEl.parentNode.removeChild(popoverEl);
+    if (node) {
+      if (node.el.parentNode)
+        node.el.parentNode.removeChild(node.el);
+      popoverNodes.delete(node.el);
+      const parent = node.parent;
+      if (parent) {
+        parent.children.delete(node);
+        if (!parent.hovered)
+          parent.scheduleHide();
+      }
+      node = null;
     }
-    popoverEl = null;
-  };
-  const scheduleHide = () => {
-    cancelHide();
-    hideTimer = window.setTimeout(hide, HIDE_DELAY_MS);
   };
   const show = async (ev) => {
     cancelHide();
     if (!plugin.settings.enableHoverPreviews)
       return;
-    if (popoverEl)
+    if (node)
       return;
     const hashIndex = linkText.indexOf("#");
     if (hashIndex === -1)
@@ -521,6 +557,9 @@ function attachVerseHoverPreview(plugin, anchorEl, linkText) {
     const allowShorthand = plugin.settings.enableShorthandSyntax;
     const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, "");
     if (!(file instanceof import_obsidian2.TFile))
+      return;
+    const parentNode = findEnclosingPopoverNode(anchorEl);
+    if (parentNode && parentNode.depth >= MAX_POPOVER_DEPTH - 1)
       return;
     const myToken = ++showToken;
     let markdown = null;
@@ -553,8 +592,24 @@ function attachVerseHoverPreview(plugin, anchorEl, linkText) {
     const el = document.createElement("div");
     el.className = "popover hover-popover verse-hover-preview";
     el.style.position = "absolute";
-    el.addEventListener("mouseenter", cancelHide);
-    el.addEventListener("mouseleave", scheduleHide);
+    const newNode = {
+      el,
+      parent: parentNode,
+      children: /* @__PURE__ */ new Set(),
+      depth: parentNode ? parentNode.depth + 1 : 0,
+      hovered: false,
+      cancelHide,
+      scheduleHide,
+      hide
+    };
+    el.addEventListener("mouseenter", () => {
+      newNode.hovered = true;
+      cancelHideUpChain(newNode);
+    });
+    el.addEventListener("mouseleave", () => {
+      newNode.hovered = false;
+      scheduleHide();
+    });
     const embed = document.createElement("div");
     embed.className = "markdown-embed is-loaded";
     el.appendChild(embed);
@@ -571,40 +626,91 @@ function attachVerseHoverPreview(plugin, anchorEl, linkText) {
     openLink.addEventListener("click", async (clickEv) => {
       clickEv.preventDefault();
       clickEv.stopPropagation();
-      hide();
+      hideRoot(newNode);
       await resolveVerseLink(plugin.app, file, fragment, allowShorthand);
     });
     embed.appendChild(openLink);
     positionPopover(el, anchorEl);
     document.body.appendChild(el);
+    if (parentNode) {
+      parentNode.children.add(newNode);
+      cancelHideUpChain(parentNode);
+    }
+    popoverNodes.set(el, newNode);
     const component = new import_obsidian2.Component();
     component.load();
     await import_obsidian2.MarkdownRenderer.renderMarkdown(markdown, previewEl, file.path, component);
     positionPopover(el, anchorEl);
     if (myToken !== showToken) {
       component.unload();
+      if (parentNode)
+        parentNode.children.delete(newNode);
+      popoverNodes.delete(el);
       if (el.parentNode)
         el.parentNode.removeChild(el);
       return;
     }
-    popoverEl = el;
+    const innerDisposers = wirePopoverContent(plugin, previewEl, newNode);
+    component.register(() => {
+      for (const d of innerDisposers)
+        d();
+    });
+    node = newNode;
     popoverComponent = component;
   };
   const suppressNative = (ev) => {
     ev.stopPropagation();
   };
   const onClickHide = () => hide();
+  const onAnchorEnter = (ev) => {
+    const enclosing = findEnclosingPopoverNode(anchorEl);
+    cancelHideUpChain(enclosing);
+    void show(ev);
+  };
   anchorEl.addEventListener("mouseover", suppressNative);
-  anchorEl.addEventListener("mouseenter", show);
+  anchorEl.addEventListener("mouseenter", onAnchorEnter);
   anchorEl.addEventListener("mouseleave", scheduleHide);
   anchorEl.addEventListener("click", onClickHide);
   return () => {
     anchorEl.removeEventListener("mouseover", suppressNative);
-    anchorEl.removeEventListener("mouseenter", show);
+    anchorEl.removeEventListener("mouseenter", onAnchorEnter);
     anchorEl.removeEventListener("mouseleave", scheduleHide);
     anchorEl.removeEventListener("click", onClickHide);
     hide();
   };
+}
+function hideRoot(node) {
+  let cur = node;
+  while (cur.parent)
+    cur = cur.parent;
+  cur.hide();
+}
+function wirePopoverContent(plugin, contentEl, ownerNode) {
+  var _a, _b;
+  const allowShorthand = plugin.settings.enableShorthandSyntax;
+  const anchors = collectVerseAnchors(contentEl, allowShorthand);
+  const disposers = [];
+  for (const a of anchors) {
+    const href = (_b = (_a = a.getAttribute("data-href")) != null ? _a : a.getAttribute("href")) != null ? _b : "";
+    const hashIdx = href.indexOf("#");
+    if (hashIdx === -1)
+      continue;
+    const filePart = href.slice(0, hashIdx);
+    const fragment = href.slice(hashIdx + 1);
+    const onClick = async (ev) => {
+      const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, "");
+      if (!(file instanceof import_obsidian2.TFile))
+        return;
+      ev.preventDefault();
+      hideRoot(ownerNode);
+      await resolveVerseLink(plugin.app, file, fragment, allowShorthand);
+    };
+    a.addEventListener("click", onClick);
+    disposers.push(() => a.removeEventListener("click", onClick));
+    const dispose = attachVerseHoverPreview(plugin, a, href);
+    disposers.push(dispose);
+  }
+  return disposers;
 }
 async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
   const single = parseVerseSingle(fragment, allowShorthand);

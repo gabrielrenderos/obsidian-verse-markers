@@ -23,7 +23,76 @@ import {
   parseVerseRange,
   parseVerseSingle,
 } from "./detection";
+import { collectVerseAnchors } from "./postprocessor";
 import type VerseMarkersPlugin from "./main";
+
+/* ---------------------------------------------------------------------------
+ * Nested popover model
+ * ---------------------------------------------------------------------------
+ * Each visible popover registers a node in `popoverNodes`. Nodes form a tree
+ * keyed by ancestry: when a popover is opened by hovering an anchor that
+ * lives inside another popover's rendered content, the new node becomes a
+ * child of that popover. Hide policy:
+ *   - A node never auto-hides while it has open children (the user is
+ *     interacting with a descendant).
+ *   - When a child closes, the parent re-evaluates: if the cursor is no
+ *     longer over the parent, schedule a hide.
+ *   - When a node hides, all of its descendants hide first (so closing a
+ *     parent reliably tears down the whole subtree).
+ * Depth is capped at MAX_POPOVER_DEPTH to avoid runaway nesting.
+ * ------------------------------------------------------------------------- */
+
+interface PopoverNode {
+  el: HTMLElement;
+  parent: PopoverNode | null;
+  children: Set<PopoverNode>;
+  depth: number;
+  /** Cursor currently over the popover's own frame (NOT its source anchor). */
+  hovered: boolean;
+  cancelHide: () => void;
+  scheduleHide: () => void;
+  hide: () => void;
+}
+
+/**
+ * Hard cap on popover chain depth. Realistic chains are 2–3 deep; this is
+ * intentionally well above that so we never deny a legitimate use, but
+ * still bounded so a pathological link-cycle can't keep allocating
+ * components forever.
+ */
+const MAX_POPOVER_DEPTH = 16;
+
+/** Live popover-node lookup, used to find the parent of a nested popover. */
+const popoverNodes: WeakMap<HTMLElement, PopoverNode> = new WeakMap();
+
+/**
+ * Walks up from `node` to find the nearest enclosing popover frame and
+ * returns its registered PopoverNode, or null if `node` is not inside any
+ * verse popover.
+ */
+function findEnclosingPopoverNode(node: Node | null): PopoverNode | null {
+  let cur: Node | null = node;
+  while (cur) {
+    if (
+      cur.nodeType === Node.ELEMENT_NODE &&
+      (cur as HTMLElement).classList.contains("verse-hover-preview")
+    ) {
+      const found = popoverNodes.get(cur as HTMLElement);
+      if (found) return found;
+    }
+    cur = cur.parentNode;
+  }
+  return null;
+}
+
+/** Cancels the hide timer for `node` and every ancestor up to the root. */
+function cancelHideUpChain(node: PopoverNode | null): void {
+  let cur = node;
+  while (cur) {
+    cur.cancelHide();
+    cur = cur.parent;
+  }
+}
 
 /** Converts a single lowercase letter "a".."z" to a zero-based index. */
 function partToIndex(part: string): number {
@@ -188,7 +257,7 @@ export function attachVerseHoverPreview(
   anchorEl: HTMLElement,
   linkText: string
 ): () => void {
-  let popoverEl: HTMLElement | null = null;
+  let node: PopoverNode | null = null;
   let popoverComponent: Component | null = null;
   let hideTimer: number | null = null;
   // Monotonic counter so we can cancel a stale async show() when the user
@@ -202,29 +271,54 @@ export function attachVerseHoverPreview(
     }
   };
 
+  /**
+   * Schedules a hide unless this popover has open child popovers — in that
+   * case the user is still interacting with a descendant and we must not
+   * tear down the chain. The child's own hide() will re-trigger this on
+   * its way out, so the parent collapses naturally afterwards.
+   */
+  const scheduleHide = (): void => {
+    cancelHide();
+    if (node && node.children.size > 0) return;
+    hideTimer = window.setTimeout(hide, HIDE_DELAY_MS);
+  };
+
   const hide = (): void => {
     cancelHide();
     showToken++; // invalidate any in-flight show()
+
+    // Hide all descendants first so the subtree disappears as a unit.
+    // Iterate over a copy because each child.hide() removes itself from
+    // node.children via its parent-bookkeeping below.
+    if (node) {
+      const children = Array.from(node.children);
+      for (const c of children) c.hide();
+    }
+
     if (popoverComponent) {
       popoverComponent.unload();
       popoverComponent = null;
     }
-    if (popoverEl && popoverEl.parentNode) {
-      popoverEl.parentNode.removeChild(popoverEl);
+    if (node) {
+      if (node.el.parentNode) node.el.parentNode.removeChild(node.el);
+      popoverNodes.delete(node.el);
+      const parent = node.parent;
+      if (parent) {
+        parent.children.delete(node);
+        // If the cursor is no longer over the parent's frame, the chain
+        // should now collapse: schedule the parent's hide. If the cursor
+        // IS over the parent, scheduleHide is a no-op until mouseleave.
+        if (!parent.hovered) parent.scheduleHide();
+      }
+      node = null;
     }
-    popoverEl = null;
-  };
-
-  const scheduleHide = (): void => {
-    cancelHide();
-    hideTimer = window.setTimeout(hide, HIDE_DELAY_MS);
   };
 
   const show = async (ev: MouseEvent): Promise<void> => {
     cancelHide();
     if (!plugin.settings.enableHoverPreviews) return;
     // Already visible — don't rebuild.
-    if (popoverEl) return;
+    if (node) return;
 
     const hashIndex = linkText.indexOf("#");
     if (hashIndex === -1) return;
@@ -235,6 +329,12 @@ export function attachVerseHoverPreview(
 
     const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, "");
     if (!(file instanceof TFile)) return;
+
+    // Identify parent popover (if this anchor lives inside one) and bail
+    // out early if we'd exceed the depth cap. Using `>=` because the new
+    // popover would sit one level deeper than its parent.
+    const parentNode = findEnclosingPopoverNode(anchorEl);
+    if (parentNode && parentNode.depth >= MAX_POPOVER_DEPTH - 1) return;
 
     const myToken = ++showToken;
 
@@ -284,8 +384,29 @@ export function attachVerseHoverPreview(
     el.className = "popover hover-popover verse-hover-preview";
     el.style.position = "absolute";
 
-    el.addEventListener("mouseenter", cancelHide);
-    el.addEventListener("mouseleave", scheduleHide);
+    // Build the node up-front so closures below can reference it by capture.
+    const newNode: PopoverNode = {
+      el,
+      parent: parentNode,
+      children: new Set(),
+      depth: parentNode ? parentNode.depth + 1 : 0,
+      hovered: false,
+      cancelHide,
+      scheduleHide,
+      hide,
+    };
+
+    // Mouse on this popover: cancel hide for every ancestor too, so
+    // moving the cursor into a deeply-nested popover keeps the whole
+    // chain alive.
+    el.addEventListener("mouseenter", () => {
+      newNode.hovered = true;
+      cancelHideUpChain(newNode);
+    });
+    el.addEventListener("mouseleave", () => {
+      newNode.hovered = false;
+      scheduleHide();
+    });
 
     const embed = document.createElement("div");
     embed.className = "markdown-embed is-loaded";
@@ -310,7 +431,8 @@ export function attachVerseHoverPreview(
     openLink.addEventListener("click", async (clickEv) => {
       clickEv.preventDefault();
       clickEv.stopPropagation();
-      hide();
+      // Closing from the root collapses the whole chain at once.
+      hideRoot(newNode);
       await resolveVerseLink(plugin.app, file, fragment, allowShorthand);
     });
     embed.appendChild(openLink);
@@ -320,6 +442,16 @@ export function attachVerseHoverPreview(
     // popover's actual size (so we can flip above / clip to viewport).
     positionPopover(el, anchorEl);
     document.body.appendChild(el);
+
+    // Register parent ↔ child link as soon as the DOM is in place. This is
+    // intentionally before the async render: if the parent's hide timer
+    // was already running (because mouseleave fired during the await
+    // above), the child's existence must block it from firing.
+    if (parentNode) {
+      parentNode.children.add(newNode);
+      cancelHideUpChain(parentNode);
+    }
+    popoverNodes.set(el, newNode);
 
     const component = new Component();
     component.load();
@@ -331,11 +463,23 @@ export function attachVerseHoverPreview(
     // Yet another cancellation window — render might be slow.
     if (myToken !== showToken) {
       component.unload();
+      if (parentNode) parentNode.children.delete(newNode);
+      popoverNodes.delete(el);
       if (el.parentNode) el.parentNode.removeChild(el);
       return;
     }
 
-    popoverEl = el;
+    // Wire hover + click on every verse anchor inside the rendered
+    // preview, so links nested in the popover behave the same as those in
+    // the reading view: hovering opens a (deeper) popover, clicking
+    // navigates and closes the chain. Disposers are tied to the
+    // popover's Component so they're released on hide().
+    const innerDisposers = wirePopoverContent(plugin, previewEl, newNode);
+    component.register(() => {
+      for (const d of innerDisposers) d();
+    });
+
+    node = newNode;
     popoverComponent = component;
   };
 
@@ -351,18 +495,73 @@ export function attachVerseHoverPreview(
   // would otherwise stay orphaned in document.body forever.
   const onClickHide = (): void => hide();
 
+  // Anchor enter/leave keep ancestors alive too: hovering a verse link
+  // inside a popover should not let any ancestor time out.
+  const onAnchorEnter = (ev: MouseEvent): void => {
+    const enclosing = findEnclosingPopoverNode(anchorEl);
+    cancelHideUpChain(enclosing);
+    void show(ev);
+  };
+
   anchorEl.addEventListener("mouseover", suppressNative);
-  anchorEl.addEventListener("mouseenter", show);
+  anchorEl.addEventListener("mouseenter", onAnchorEnter);
   anchorEl.addEventListener("mouseleave", scheduleHide);
   anchorEl.addEventListener("click", onClickHide);
 
   return () => {
     anchorEl.removeEventListener("mouseover", suppressNative);
-    anchorEl.removeEventListener("mouseenter", show);
+    anchorEl.removeEventListener("mouseenter", onAnchorEnter);
     anchorEl.removeEventListener("mouseleave", scheduleHide);
     anchorEl.removeEventListener("click", onClickHide);
     hide();
   };
+}
+
+/** Walks up the popover chain from `node` and hides the root, cascading. */
+function hideRoot(node: PopoverNode): void {
+  let cur: PopoverNode = node;
+  while (cur.parent) cur = cur.parent;
+  cur.hide();
+}
+
+/**
+ * Wires hover + click handlers on every verse-reference anchor inside an
+ * already-rendered popover preview. Returns disposer callbacks the caller
+ * is responsible for invoking on teardown (we attach them to the
+ * popover's own Component).
+ *
+ * Click closes the entire chain (root popover + descendants) before
+ * navigating, so the user lands on the target note with a clean viewport.
+ */
+function wirePopoverContent(
+  plugin: VerseMarkersPlugin,
+  contentEl: HTMLElement,
+  ownerNode: PopoverNode
+): Array<() => void> {
+  const allowShorthand = plugin.settings.enableShorthandSyntax;
+  const anchors = collectVerseAnchors(contentEl, allowShorthand);
+  const disposers: Array<() => void> = [];
+  for (const a of anchors) {
+    const href = a.getAttribute("data-href") ?? a.getAttribute("href") ?? "";
+    const hashIdx = href.indexOf("#");
+    if (hashIdx === -1) continue;
+    const filePart = href.slice(0, hashIdx);
+    const fragment = href.slice(hashIdx + 1);
+
+    const onClick = async (ev: MouseEvent): Promise<void> => {
+      const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, "");
+      if (!(file instanceof TFile)) return;
+      ev.preventDefault();
+      hideRoot(ownerNode);
+      await resolveVerseLink(plugin.app, file, fragment, allowShorthand);
+    };
+    a.addEventListener("click", onClick);
+    disposers.push(() => a.removeEventListener("click", onClick));
+
+    const dispose = attachVerseHoverPreview(plugin, a as HTMLElement, href);
+    disposers.push(dispose);
+  }
+  return disposers;
 }
 
 /** @deprecated use attachVerseHoverPreview. Kept temporarily for back-compat. */
