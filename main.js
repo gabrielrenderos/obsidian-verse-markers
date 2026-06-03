@@ -39,17 +39,37 @@ var HEADING_LINE_REGEX = /^\s*#{1,6}\s+\S.*$/;
 function stripBlockquoteMarker(line) {
   return line.replace(/^\s*>\s?/, "");
 }
-function splitVersePartsByHeadings(rawContent) {
-  const lines = rawContent.split("\n").map(stripBlockquoteMarker);
-  const parts = [[]];
-  for (const line of lines) {
-    if (HEADING_LINE_REGEX.test(line)) {
-      parts.push([]);
-    } else {
-      parts[parts.length - 1].push(line);
+function splitSegmentByFootnotes(segment) {
+  const re = new RegExp(FOOTNOTE_REF_REGEX.source, "g");
+  const parts = [];
+  let lastIndex = 0;
+  let m;
+  while ((m = re.exec(segment)) !== null) {
+    const cut = m.index + m[0].length;
+    if (/\S/.test(segment.slice(lastIndex, m.index)) && /\S/.test(segment.slice(cut))) {
+      parts.push(segment.slice(lastIndex, cut));
+      lastIndex = cut;
     }
   }
-  return parts.map((group) => group.join("\n").trim());
+  parts.push(segment.slice(lastIndex));
+  return parts;
+}
+function versePartSegments(rawContent) {
+  const lines = rawContent.split("\n").map(stripBlockquoteMarker);
+  const segments = [[]];
+  for (const line of lines) {
+    if (HEADING_LINE_REGEX.test(line)) {
+      segments.push([]);
+    } else {
+      segments[segments.length - 1].push(line);
+    }
+  }
+  return segments.map(
+    (group) => splitSegmentByFootnotes(group.join("\n")).map((part) => part.trim())
+  );
+}
+function splitVerseParts(rawContent) {
+  return versePartSegments(rawContent).flat();
 }
 function findVerseSpan(text, verseNumber) {
   const re = getVerseRegex();
@@ -76,7 +96,7 @@ function getVerseParts(text, verseNumber) {
   const span = findVerseSpan(text, verseNumber);
   if (!span)
     return null;
-  return splitVersePartsByHeadings(text.slice(span.start, span.end));
+  return splitVerseParts(text.slice(span.start, span.end));
 }
 function getVerseContent(text, verseNumber, part = null) {
   const parts = getVerseParts(text, verseNumber);
@@ -137,6 +157,57 @@ function stripTrailingHeadingsBeforeNextVerse(raw) {
   }
   return lines.slice(0, end).join("\n").trimEnd();
 }
+var FOOTNOTE_REF_REGEX = /\[\^([^\]\s]+)\](?!:)/g;
+var FOOTNOTE_DEF_HEAD_REGEX = /^\[\^([^\]\s]+)\]:/;
+function appendMissingFootnoteDefinitions(slice, fullText) {
+  const referenced = /* @__PURE__ */ new Set();
+  let m;
+  const refRe = new RegExp(FOOTNOTE_REF_REGEX.source, FOOTNOTE_REF_REGEX.flags);
+  while ((m = refRe.exec(slice)) !== null) {
+    referenced.add(m[1]);
+  }
+  if (referenced.size === 0)
+    return slice;
+  const sliceLines = slice.split("\n");
+  for (const line of sliceLines) {
+    const head = FOOTNOTE_DEF_HEAD_REGEX.exec(line);
+    if (head)
+      referenced.delete(head[1]);
+  }
+  if (referenced.size === 0)
+    return slice;
+  const fullLines = fullText.split("\n");
+  const appended = [];
+  for (let i = 0; i < fullLines.length; i++) {
+    const head = FOOTNOTE_DEF_HEAD_REGEX.exec(fullLines[i]);
+    if (!head)
+      continue;
+    if (!referenced.has(head[1]))
+      continue;
+    const block = [fullLines[i]];
+    let j = i + 1;
+    while (j < fullLines.length) {
+      const next = fullLines[j];
+      if (next === "" || /^[ \t]/.test(next)) {
+        block.push(next);
+        j++;
+      } else {
+        break;
+      }
+    }
+    while (block.length > 0 && block[block.length - 1] === "")
+      block.pop();
+    appended.push(block.join("\n"));
+    referenced.delete(head[1]);
+    if (referenced.size === 0)
+      break;
+  }
+  if (appended.length === 0)
+    return slice;
+  return `${slice}
+
+${appended.join("\n\n")}`;
+}
 function findVerseLine(text, verseNumber) {
   const re = getVerseRegex();
   let match;
@@ -152,6 +223,49 @@ function findVerseLine(text, verseNumber) {
     }
   }
   return null;
+}
+function continuationPartAnchor(text, blockStartLine) {
+  const lines = text.split("\n");
+  let headingCount = 0;
+  let verseNumber = null;
+  for (let i = blockStartLine - 1; i >= 0; i--) {
+    if (HEADING_LINE_REGEX.test(stripBlockquoteMarker(lines[i]))) {
+      headingCount++;
+      continue;
+    }
+    const marker = getVerseRegex().exec(lines[i]);
+    if (marker) {
+      verseNumber = parseInt(marker[0].slice(1, -1), 10);
+      break;
+    }
+  }
+  if (verseNumber === null || headingCount === 0)
+    return null;
+  let index = headingCount;
+  const span = findVerseSpan(text, verseNumber);
+  if (span) {
+    const segments = versePartSegments(text.slice(span.start, span.end));
+    for (let s = 0; s < headingCount && s < segments.length; s++) {
+      index += segments[s].length - 1;
+    }
+  }
+  return `verse-${verseNumber}${String.fromCharCode(97 + index)}`;
+}
+function partHasAnchor(text, verseNumber, part) {
+  if (part === null)
+    return true;
+  const span = findVerseSpan(text, verseNumber);
+  if (!span)
+    return false;
+  const segments = versePartSegments(text.slice(span.start, span.end));
+  const target = part.charCodeAt(0) - "a".charCodeAt(0);
+  let segmentStart = 0;
+  for (const segment of segments) {
+    if (segmentStart === target)
+      return true;
+    segmentStart += segment.length;
+  }
+  return false;
 }
 function parseVerseRange(fragment, allowShorthand = false) {
   var _a, _b;
@@ -282,25 +396,7 @@ function partAnchorForBlock(el, ctx) {
   const blockText = sourceLines.slice(info.lineStart, info.lineEnd + 1).join("\n");
   if (getVerseRegex().test(blockText))
     return null;
-  let headingCount = 0;
-  let verseNumber = null;
-  for (let i = info.lineStart - 1; i >= 0; i--) {
-    const line = sourceLines[i];
-    const bare = line.replace(/^\s*>\s?/, "");
-    if (/^\s*#{1,6}\s+\S.*$/.test(bare)) {
-      headingCount++;
-      continue;
-    }
-    const markerMatch = getVerseRegex().exec(line);
-    if (markerMatch) {
-      verseNumber = parseInt(markerMatch[0].slice(1, -1), 10);
-      break;
-    }
-  }
-  if (verseNumber === null || headingCount === 0)
-    return null;
-  const partLetter = String.fromCharCode("a".charCodeAt(0) + headingCount);
-  return `verse-${verseNumber}${partLetter}`;
+  return continuationPartAnchor(info.text, info.lineStart);
 }
 function injectPartAnchor(el, id) {
   if (el.querySelector(`#${CSS.escape(id)}`))
@@ -440,12 +536,17 @@ function cancelHideUpChain(node) {
 function partToIndex(part) {
   return part.charCodeAt(0) - "a".charCodeAt(0);
 }
+function verseMarkerLabel(label) {
+  return `<span class="verse-marker">${label}</span>`;
+}
 async function buildRangePreviewMarkdown(app, file, start, end, maxVerses, startPart = null, endPart = null) {
   const content = await app.vault.cachedRead(file);
   const limit = Math.min(end, start + maxVerses - 1);
   if (startPart === null && endPart === null) {
     const raw = getVerseRangeRawText(content, start, limit);
-    return raw && raw.length > 0 ? raw : null;
+    if (!raw || raw.length === 0)
+      return null;
+    return appendMissingFootnoteDefinitions(raw, content);
   }
   const blocks = [];
   for (let n = start; n <= limit; n++) {
@@ -474,11 +575,12 @@ async function buildRangePreviewMarkdown(app, file, start, end, maxVerses, start
       if (verseText === null)
         continue;
     }
-    blocks.push(`[${label}] ${verseText}`);
+    blocks.push(`${verseMarkerLabel(label)} ${verseText}`);
   }
   if (blocks.length === 0)
     return null;
-  return blocks.join("\n\n");
+  const joined = blocks.join("\n\n");
+  return appendMissingFootnoteDefinitions(joined, content);
 }
 async function buildSinglePreviewMarkdown(app, file, verse, part) {
   const content = await app.vault.cachedRead(file);
@@ -486,7 +588,8 @@ async function buildSinglePreviewMarkdown(app, file, verse, part) {
   if (verseText === null || verseText.length === 0)
     return null;
   const label = part ? `${verse}${part}` : `${verse}`;
-  return `[${label}] ${verseText}`;
+  const body = `${verseMarkerLabel(label)} ${verseText}`;
+  return appendMissingFootnoteDefinitions(body, content);
 }
 var HIDE_DELAY_MS = 200;
 var POPOVER_GAP_PX = 4;
@@ -753,6 +856,10 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
   if (!leaf)
     return false;
   const content = await app.vault.cachedRead(file);
+  if (!partHasAnchor(content, startVerse, startPart))
+    startPart = null;
+  if (!partHasAnchor(content, endVerse, endPart))
+    endPart = null;
   const targetLine = findVerseLine(content, startVerse);
   const primaryId = startPart ? `verse-${startVerse}${startPart}` : `verse-${startVerse}`;
   const fallbackId = `verse-${startVerse}`;

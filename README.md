@@ -85,6 +85,19 @@ You can link to the whole verse or a specific part:
 - `[[File#verse-4b]]` → "Still verse 4, continuation."
 - `[[File#verse-4c]]` → "Final chunk of verse 4."
 
+### Footnote-split verses
+
+An *interior* footnote reference also creates a part boundary — the cut falls right after the footnote token, so part `a` keeps the marker attached to the text it annotates:
+
+```markdown
+[2] Then a leper[^1] came and knelt before him.
+```
+
+- `[[File#verse-2a]]` → "Then a leper[^1]"
+- `[[File#verse-2b]]` → "came and knelt before him."
+
+A footnote only splits when there is verse text on **both** sides of it. Footnotes at the very start or end of a verse, or sitting on a heading line, are *not* boundaries — the verse stays whole through them. Heading and footnote boundaries are lettered together in document order (a, b, c, …), so a verse with one footnote then one heading yields parts a/b (around the footnote) and c (after the heading).
+
 ## Referencing verses
 
 ### Default (always on)

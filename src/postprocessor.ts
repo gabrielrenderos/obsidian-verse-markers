@@ -6,6 +6,7 @@
 import { MarkdownPostProcessorContext } from "obsidian";
 import {
   getVerseRegex,
+  continuationPartAnchor,
   VERSE_FRAGMENT_TEST_STRICT,
   VERSE_FRAGMENT_TEST_LOOSE,
 } from "./detection";
@@ -137,16 +138,13 @@ export function collectVerseAnchors(
 
 /**
  * Determines whether `el`'s block is a continuation of a verse that was
- * split by one or more headings above it. If so, returns the anchor id to
- * inject at the block's start (e.g. "verse-4b").
- *
- * Approach: use the post-processor context to get the full markdown source
- * and the current block's line range. Walk backward through the source
- * looking for the most recent verse marker. Count how many headings sit
- * between that marker and this block. If ≥ 1, this block is part "b", "c", …
+ * split above it. If so, returns the anchor id to inject at the block's
+ * start (e.g. "verse-4b").
  *
  * Returns null when no injection is warranted — e.g. the block already
- * contains its own verse marker (part "a" gets its id from that marker span).
+ * contains its own verse marker (part "a" gets its id from that marker
+ * span). The part-letter computation itself (heading + interior-footnote
+ * boundaries) lives in detection.ts so it stays the single source of truth.
  */
 function partAnchorForBlock(
   el: HTMLElement,
@@ -155,41 +153,13 @@ function partAnchorForBlock(
   const info = ctx.getSectionInfo(el);
   if (!info) return null;
 
-  const sourceLines = info.text.split("\n");
   // If the block itself contains a verse marker, its own marker carries the
   // "verse-N" id — no extra injection needed for part a.
+  const sourceLines = info.text.split("\n");
   const blockText = sourceLines.slice(info.lineStart, info.lineEnd + 1).join("\n");
   if (getVerseRegex().test(blockText)) return null;
 
-  // Scan upward from lineStart-1 for the most recent verse marker, counting
-  // heading lines along the way. Stop if we hit another verse marker before
-  // any heading (means this block is not a continuation).
-  let headingCount = 0;
-  let verseNumber: number | null = null;
-
-  for (let i = info.lineStart - 1; i >= 0; i--) {
-    const line = sourceLines[i];
-    const bare = line.replace(/^\s*>\s?/, "");
-
-    // Heading line?
-    if (/^\s*#{1,6}\s+\S.*$/.test(bare)) {
-      headingCount++;
-      continue;
-    }
-
-    // Verse marker on this line?
-    const markerMatch = getVerseRegex().exec(line);
-    if (markerMatch) {
-      verseNumber = parseInt(markerMatch[0].slice(1, -1), 10);
-      break;
-    }
-  }
-
-  if (verseNumber === null || headingCount === 0) return null;
-
-  // part b = 1 heading, c = 2 headings, …
-  const partLetter = String.fromCharCode("a".charCodeAt(0) + headingCount);
-  return `verse-${verseNumber}${partLetter}`;
+  return continuationPartAnchor(info.text, info.lineStart);
 }
 
 /**

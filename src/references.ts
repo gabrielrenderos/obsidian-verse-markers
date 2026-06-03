@@ -24,12 +24,14 @@ import {
   setIcon,
 } from "obsidian";
 import {
+  appendMissingFootnoteDefinitions,
   findVerseLine,
   getVerseContent,
   getVerseParts,
   getVerseRangeRawText,
   parseVerseRange,
   parseVerseSingle,
+  partHasAnchor,
 } from "./detection";
 import { collectVerseAnchors } from "./postprocessor";
 import type VerseMarkersPlugin from "./main";
@@ -108,6 +110,19 @@ function partToIndex(part: string): number {
 }
 
 /**
+ * Renders a verse label (e.g. "3" or "3b") as a `.verse-marker` span so the
+ * popover colors it with the theme accent, exactly like the bracket-less
+ * markers the reading-view post-processor produces from `[N]`.
+ *
+ * We can't just emit `[3b]` markdown and let the post-processor style it:
+ * the canonical verse-marker regex matches digit-only tokens, so a part
+ * label like "3b" would slip through and render as unstyled plain text.
+ */
+function verseMarkerLabel(label: string): string {
+  return `<span class="verse-marker">${label}</span>`;
+}
+
+/**
  * Builds the markdown source for a verse range preview.
  *
  * `startPart` and `endPart` (if given) trim the endpoints to a specific
@@ -135,7 +150,12 @@ export async function buildRangePreviewMarkdown(
   // rest, giving the preview the same look as the reading view.
   if (startPart === null && endPart === null) {
     const raw = getVerseRangeRawText(content, start, limit);
-    return raw && raw.length > 0 ? raw : null;
+    if (!raw || raw.length === 0) return null;
+    // Footnote definitions usually live at the bottom of the file, well
+    // outside this slice. Append the ones referenced inside the slice so
+    // MarkdownRenderer can resolve them — without this, refs render as
+    // bare unstyled numbers and there's no footnote section in the popover.
+    return appendMissingFootnoteDefinitions(raw, content);
   }
 
   // Trimmed path: one or both endpoints reference a specific part, so we
@@ -164,11 +184,12 @@ export async function buildRangePreviewMarkdown(
       if (verseText === null) continue;
     }
 
-    blocks.push(`[${label}] ${verseText}`);
+    blocks.push(`${verseMarkerLabel(label)} ${verseText}`);
   }
 
   if (blocks.length === 0) return null;
-  return blocks.join("\n\n");
+  const joined = blocks.join("\n\n");
+  return appendMissingFootnoteDefinitions(joined, content);
 }
 
 /**
@@ -186,7 +207,8 @@ export async function buildSinglePreviewMarkdown(
   const verseText = getVerseContent(content, verse, part);
   if (verseText === null || verseText.length === 0) return null;
   const label = part ? `${verse}${part}` : `${verse}`;
-  return `[${label}] ${verseText}`;
+  const body = `${verseMarkerLabel(label)} ${verseText}`;
+  return appendMissingFootnoteDefinitions(body, content);
 }
 
 /**
@@ -623,6 +645,14 @@ export async function resolveVerseLink(
   // Pre-compute the verse's source line and anchor IDs once so we can
   // decide whether eState's forced scroll is even needed.
   const content = await app.vault.cachedRead(file);
+
+  // Interior footnote parts have no scroll anchor in the reading view (only
+  // heading-boundary parts and part "a" do). When the referenced part isn't
+  // anchored, drop the part suffix so navigation scrolls to and flashes the
+  // complete verse instead of nothing. Heading-split parts are unaffected.
+  if (!partHasAnchor(content, startVerse, startPart)) startPart = null;
+  if (!partHasAnchor(content, endVerse, endPart)) endPart = null;
+
   const targetLine = findVerseLine(content, startVerse);
   const primaryId = startPart
     ? `verse-${startVerse}${startPart}`

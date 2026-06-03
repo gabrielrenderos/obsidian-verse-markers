@@ -29,14 +29,17 @@ export function getVerseRegex(): RegExp {
  * verse marker (which may be many lines later and/or inside a blockquote),
  * or to end of text if no further markers exist.
  *
- * If an ATX heading (#..######) appears inside that span, the content is
- * considered split into sub-parts:
- *   part "a" → text before the first heading
- *   part "b" → text between the first and second heading
+ * The content is split into lettered sub-parts at two kinds of boundary:
+ *   1. ATX headings (#..######) inside the span.
+ *   2. *Interior* footnote references `[^id]` — a footnote that has verse
+ *      text on BOTH sides of it (so footnotes at the very start/end of the
+ *      verse, or sitting on a heading line, never split it).
+ *   part "a" → text up to the first boundary
+ *   part "b" → text between the first and second boundary
  *   ...
- * The heading lines themselves are never included in any part.
+ * Heading lines (and any footnote on them) are never included in any part.
  * A reference without a part (verse-N) returns the parts joined by a single
- * space so the heading-adjacent newlines don't leak through.
+ * space so the boundary-adjacent newlines don't leak through.
  * ------------------------------------------------------------------------- */
 
 /** ATX-style heading line: optional indent, 1–6 `#`, at least one non-space char after. */
@@ -48,21 +51,57 @@ function stripBlockquoteMarker(line: string): string {
 }
 
 /**
- * Splits a verse's raw content span into heading-delimited parts.
- * Returns a trimmed string per part (index 0 = "a", 1 = "b", …).
- * Blockquote markers are stripped so verses inside `>` blocks render cleanly.
+ * Splits one heading-delimited segment further at *interior* footnote
+ * references. A footnote `[^id]` creates a boundary only when there is
+ * verse text on BOTH sides of it within the segment, so a footnote at the
+ * segment's very start or end (or one standing alone) never splits it. The
+ * cut falls immediately after the footnote token, keeping the marker
+ * attached to the text it annotates.
  */
-function splitVersePartsByHeadings(rawContent: string): string[] {
-  const lines = rawContent.split("\n").map(stripBlockquoteMarker);
-  const parts: string[][] = [[]];
-  for (const line of lines) {
-    if (HEADING_LINE_REGEX.test(line)) {
-      parts.push([]);
-    } else {
-      parts[parts.length - 1].push(line);
+function splitSegmentByFootnotes(segment: string): string[] {
+  const re = new RegExp(FOOTNOTE_REF_REGEX.source, "g");
+  const parts: string[] = [];
+  let lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(segment)) !== null) {
+    const cut = m.index + m[0].length;
+    if (/\S/.test(segment.slice(lastIndex, m.index)) && /\S/.test(segment.slice(cut))) {
+      parts.push(segment.slice(lastIndex, cut));
+      lastIndex = cut;
     }
   }
-  return parts.map((group) => group.join("\n").trim());
+  parts.push(segment.slice(lastIndex));
+  return parts;
+}
+
+/**
+ * Groups a verse's raw content into heading-delimited segments, each
+ * further divided into footnote-delimited sub-parts. Reading order is
+ * segment 0's parts, then segment 1's, etc. Blockquote markers are
+ * stripped and heading lines are dropped (their text — and any footnote on
+ * them — is never part of any verse part).
+ */
+function versePartSegments(rawContent: string): string[][] {
+  const lines = rawContent.split("\n").map(stripBlockquoteMarker);
+  const segments: string[][] = [[]];
+  for (const line of lines) {
+    if (HEADING_LINE_REGEX.test(line)) {
+      segments.push([]);
+    } else {
+      segments[segments.length - 1].push(line);
+    }
+  }
+  return segments.map((group) =>
+    splitSegmentByFootnotes(group.join("\n")).map((part) => part.trim())
+  );
+}
+
+/**
+ * Splits a verse's raw content span into ordered parts (index 0 = "a",
+ * 1 = "b", …) at heading and interior-footnote boundaries.
+ */
+function splitVerseParts(rawContent: string): string[] {
+  return versePartSegments(rawContent).flat();
 }
 
 /**
@@ -106,7 +145,7 @@ export function getVerseParts(
 ): string[] | null {
   const span = findVerseSpan(text, verseNumber);
   if (!span) return null;
-  return splitVersePartsByHeadings(text.slice(span.start, span.end));
+  return splitVerseParts(text.slice(span.start, span.end));
 }
 
 /**
@@ -212,6 +251,85 @@ function stripTrailingHeadingsBeforeNextVerse(raw: string): string {
 }
 
 /**
+ * Footnote reference syntax: `[^id]` not followed by `:` (which would
+ * make it a definition). The id can contain any non-bracket, non-space
+ * characters — covers numeric, alphabetic, and Obsidian's
+ * dash/underscore-separated identifiers.
+ */
+const FOOTNOTE_REF_REGEX = /\[\^([^\]\s]+)\](?!:)/g;
+
+/**
+ * Footnote definition syntax: `[^id]:` at the start of a line. The
+ * definition body may continue onto subsequent lines as long as those
+ * lines are blank or indented (per CommonMark/Obsidian footnote rules).
+ */
+const FOOTNOTE_DEF_HEAD_REGEX = /^\[\^([^\]\s]+)\]:/;
+
+/**
+ * Scans `slice` for footnote references whose definitions are missing
+ * from the slice itself, then appends those definitions (looked up in
+ * `fullText`) so the rendered popover can resolve them.
+ *
+ * Why this is needed: footnote definitions in Obsidian conventionally
+ * live at the bottom of a note, well outside the verse-range slice we
+ * pass to MarkdownRenderer. Without their definitions, references like
+ * `[^1]` render as a bare unstyled number with no popup and no
+ * footnote section below.
+ *
+ * Definitions that already appear inside the slice (e.g. when the user
+ * keeps a footnote inline right after the verse) are left untouched —
+ * we only append the ones that would otherwise be unresolved.
+ */
+export function appendMissingFootnoteDefinitions(
+  slice: string,
+  fullText: string
+): string {
+  const referenced = new Set<string>();
+  let m: RegExpExecArray | null;
+
+  const refRe = new RegExp(FOOTNOTE_REF_REGEX.source, FOOTNOTE_REF_REGEX.flags);
+  while ((m = refRe.exec(slice)) !== null) {
+    referenced.add(m[1]);
+  }
+  if (referenced.size === 0) return slice;
+
+  const sliceLines = slice.split("\n");
+  for (const line of sliceLines) {
+    const head = FOOTNOTE_DEF_HEAD_REGEX.exec(line);
+    if (head) referenced.delete(head[1]);
+  }
+  if (referenced.size === 0) return slice;
+
+  const fullLines = fullText.split("\n");
+  const appended: string[] = [];
+  for (let i = 0; i < fullLines.length; i++) {
+    const head = FOOTNOTE_DEF_HEAD_REGEX.exec(fullLines[i]);
+    if (!head) continue;
+    if (!referenced.has(head[1])) continue;
+
+    const block: string[] = [fullLines[i]];
+    let j = i + 1;
+    while (j < fullLines.length) {
+      const next = fullLines[j];
+      // Continuation: blank line or indented (4+ spaces / tab) line.
+      if (next === "" || /^[ \t]/.test(next)) {
+        block.push(next);
+        j++;
+      } else {
+        break;
+      }
+    }
+    while (block.length > 0 && block[block.length - 1] === "") block.pop();
+    appended.push(block.join("\n"));
+    referenced.delete(head[1]);
+    if (referenced.size === 0) break;
+  }
+
+  if (appended.length === 0) return slice;
+  return `${slice}\n\n${appended.join("\n\n")}`;
+}
+
+/**
  * Returns the 0-indexed source line containing the marker for `verseNumber`,
  * or null if the verse is not present.
  *
@@ -245,7 +363,82 @@ export function findVerseLine(
 export function countVerseParts(text: string, verseNumber: number): number {
   const span = findVerseSpan(text, verseNumber);
   if (!span) return 0;
-  return splitVersePartsByHeadings(text.slice(span.start, span.end)).length;
+  return splitVerseParts(text.slice(span.start, span.end)).length;
+}
+
+/**
+ * Computes the part-anchor id (e.g. "verse-4c") for a reading-view block
+ * that is a heading-split continuation of a verse defined above it.
+ * `blockStartLine` is the 0-indexed source line where the block begins.
+ *
+ * Only headings start new reading-view blocks, so continuation anchors are
+ * always heading-driven; interior footnotes split text mid-block and get no
+ * anchor of their own. But the LETTER must still account for them: it
+ * reflects every boundary above the block — the headings between the verse
+ * marker and the block, plus the interior footnotes inside those earlier
+ * segments — so the injected anchor stays in lockstep with getVerseParts.
+ *
+ * Returns null when the block does not continue a split verse (no heading +
+ * verse marker precede it).
+ */
+export function continuationPartAnchor(
+  text: string,
+  blockStartLine: number
+): string | null {
+  const lines = text.split("\n");
+  let headingCount = 0;
+  let verseNumber: number | null = null;
+  for (let i = blockStartLine - 1; i >= 0; i--) {
+    if (HEADING_LINE_REGEX.test(stripBlockquoteMarker(lines[i]))) {
+      headingCount++;
+      continue;
+    }
+    const marker = getVerseRegex().exec(lines[i]);
+    if (marker) {
+      verseNumber = parseInt(marker[0].slice(1, -1), 10);
+      break;
+    }
+  }
+  if (verseNumber === null || headingCount === 0) return null;
+
+  // Shift the letter past any interior-footnote parts that live in the
+  // segments preceding this block (segments 0..headingCount-1).
+  let index = headingCount;
+  const span = findVerseSpan(text, verseNumber);
+  if (span) {
+    const segments = versePartSegments(text.slice(span.start, span.end));
+    for (let s = 0; s < headingCount && s < segments.length; s++) {
+      index += segments[s].length - 1;
+    }
+  }
+  return `verse-${verseNumber}${String.fromCharCode(97 + index)}`;
+}
+
+/**
+ * Reports whether `part` of `verseNumber` has a reading-view scroll anchor.
+ *
+ * Only parts that BEGIN a heading-delimited segment are anchored: part "a"
+ * (carried by the verse marker span) and the first part after each heading
+ * (injected by the post-processor). Interior footnote parts sit mid-block
+ * and get no anchor, so navigation/flash callers should fall back to the
+ * whole-verse anchor for them. `null` (the whole verse) is always anchored.
+ */
+export function partHasAnchor(
+  text: string,
+  verseNumber: number,
+  part: string | null
+): boolean {
+  if (part === null) return true;
+  const span = findVerseSpan(text, verseNumber);
+  if (!span) return false;
+  const segments = versePartSegments(text.slice(span.start, span.end));
+  const target = part.charCodeAt(0) - "a".charCodeAt(0);
+  let segmentStart = 0;
+  for (const segment of segments) {
+    if (segmentStart === target) return true;
+    segmentStart += segment.length;
+  }
+  return false;
 }
 
 /**
