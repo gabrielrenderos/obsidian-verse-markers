@@ -5,13 +5,21 @@
 
 /**
  * Canonical verse marker regex.
- * Matches [N] where N is one or more digits, with boundary conditions:
+ * Matches [N] or [N<part>] where N is one or more digits optionally followed
+ * by lowercase letters (an *authored* part suffix, e.g. [5a], [12bc]), with
+ * boundary conditions:
  * - preceded by start-of-string, >, or whitespace
  * - followed by whitespace or end-of-string
  *
+ * The required leading digit keeps this from matching ordinary bracketed
+ * Markdown like [note] or footnotes [^1], so broadening to a part suffix does
+ * not introduce false positives. The trailing letters are an editorial part
+ * label (some Bibles split a single canonical verse into [5a]…[5b]…), which
+ * shares the same `verse-Na` addressing as heading/footnote-derived parts.
+ *
  * Uses a lookbehind so captures only [N] itself (not the preceding char).
  */
-export const VERSE_MARKER_REGEX = /(?:^|(?<=[>\s]))\[\d+\](?=\s|$)/gm;
+export const VERSE_MARKER_REGEX = /(?:^|(?<=[>\s]))\[\d+[a-z]*\](?=\s|$)/gm;
 
 /**
  * Returns a fresh (lastIndex-reset) copy of the canonical regex.
@@ -20,6 +28,55 @@ export const VERSE_MARKER_REGEX = /(?:^|(?<=[>\s]))\[\d+\](?=\s|$)/gm;
  */
 export function getVerseRegex(): RegExp {
   return new RegExp(VERSE_MARKER_REGEX.source, VERSE_MARKER_REGEX.flags);
+}
+
+/**
+ * Splits a verse marker token (e.g. "[5]" or "[5a]") into its numeric verse
+ * and optional authored part letters. Returns `part: null` for a plain
+ * numeric marker. Assumes `token` already matched VERSE_MARKER_REGEX.
+ */
+export function parseMarkerToken(token: string): {
+  number: number;
+  part: string | null;
+} {
+  const m = /^\[(\d+)([a-z]*)\]$/.exec(token);
+  if (!m) return { number: NaN, part: null };
+  return { number: parseInt(m[1], 10), part: m[2] === "" ? null : m[2] };
+}
+
+/** Zero-based index of a single-letter part ("a" → 0, "b" → 1, …). */
+function partToIndex(part: string): number {
+  return part.charCodeAt(0) - "a".charCodeAt(0);
+}
+
+interface MarkerHit {
+  number: number;
+  part: string | null;
+  /** Offset of the opening "[". */
+  index: number;
+  /** Offset just past the closing "]". */
+  afterMarker: number;
+}
+
+/**
+ * Scans every verse marker in `text` in document order, returning its number,
+ * authored part (or null), and source offsets. The single low-level primitive
+ * the higher-level span/fragment/range helpers build on.
+ */
+function scanMarkers(text: string): MarkerHit[] {
+  const re = getVerseRegex();
+  const hits: MarkerHit[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const { number, part } = parseMarkerToken(m[0]);
+    hits.push({
+      number,
+      part,
+      index: m.index,
+      afterMarker: m.index + m[0].length,
+    });
+  }
+  return hits;
 }
 
 /* ---------------------------------------------------------------------------
@@ -119,7 +176,7 @@ function findVerseSpan(
   let match: RegExpExecArray | null;
 
   while ((match = re.exec(text)) !== null) {
-    const num = parseInt(match[0].slice(1, -1), 10);
+    const num = parseMarkerToken(match[0]).number;
     const afterMarker = match.index + match[0].length;
     if (spanStart === -1 && num === verseNumber) {
       if (text[afterMarker] !== " ") return null;
@@ -149,9 +206,57 @@ export function getVerseParts(
 }
 
 /**
+ * A single authored occurrence of a verse number: one `[N]`/`[Na]` marker and
+ * its content (heading lines dropped, heading/footnote sub-parts joined).
+ */
+export interface VerseFragment {
+  /** Authored part letters from the marker ("a", "bc", …) or null for `[N]`. */
+  part: string | null;
+  /** Clean verse text for this fragment. */
+  content: string;
+}
+
+/**
+ * Returns every authored fragment of `verseNumber` in document order.
+ *
+ * A canonical verse may be written once as a plain `[N]` block, or split by
+ * the editor into scattered, separately-marked pieces ([5a]…[5b]…) that can
+ * even sit out of order and be interleaved with other verses. Each marker
+ * with this number yields one fragment whose content runs to the next marker
+ * (of any number), with heading lines excluded and heading/footnote
+ * sub-segments joined into clean prose.
+ *
+ * For the common single plain `[N]` verse this returns exactly one fragment
+ * whose content equals the whole verse.
+ */
+export function getVerseFragments(
+  text: string,
+  verseNumber: number
+): VerseFragment[] {
+  const hits = scanMarkers(text);
+  const fragments: VerseFragment[] = [];
+  for (let i = 0; i < hits.length; i++) {
+    if (hits[i].number !== verseNumber) continue;
+    if (text[hits[i].afterMarker] !== " ") continue; // malformed marker
+    const contentStart = hits[i].afterMarker + 1;
+    const contentEnd = i + 1 < hits.length ? hits[i + 1].index : text.length;
+    const raw = text.slice(contentStart, contentEnd);
+    const content = splitVerseParts(raw)
+      .filter((p) => p.length > 0)
+      .join(" ");
+    fragments.push({ part: hits[i].part, content });
+  }
+  return fragments;
+}
+
+/**
  * Returns the text content of a verse (or a specific part of it).
- * - `part` null/undefined → full content, heading lines excluded, parts joined.
- * - `part` "a"/"b"/"c"/…  → that 0-indexed segment between headings.
+ * - `part` null → full content. A plain `[N]` verse joins its heading/footnote
+ *   sub-parts; a verse authored as scattered fragments ([5a]…[5b]…) joins
+ *   those fragments in document order.
+ * - `part` "a"/"b"/…  → an authored fragment with that exact part if one
+ *   exists, otherwise (for a single plain `[N]` verse) the 0-indexed
+ *   heading/footnote-split segment.
  * Returns null if the verse or requested part does not exist.
  */
 export function getVerseContent(
@@ -159,16 +264,30 @@ export function getVerseContent(
   verseNumber: number,
   part: string | null = null
 ): string | null {
-  const parts = getVerseParts(text, verseNumber);
-  if (!parts) return null;
+  const fragments = getVerseFragments(text, verseNumber);
+  if (fragments.length === 0) return null;
 
-  if (part) {
-    const idx = part.charCodeAt(0) - "a".charCodeAt(0);
-    if (idx < 0 || idx >= parts.length) return null;
-    return parts[idx];
+  if (part !== null) {
+    const explicit = fragments.find((f) => f.part === part);
+    if (explicit) return explicit.content;
+
+    // Derived fallback: only a single plain `[N]` verse exposes
+    // heading/footnote-split parts that aren't authored markers themselves.
+    if (fragments.length === 1 && fragments[0].part === null) {
+      const span = findVerseSpan(text, verseNumber);
+      if (!span) return null;
+      const parts = splitVerseParts(text.slice(span.start, span.end));
+      const idx = partToIndex(part);
+      if (idx < 0 || idx >= parts.length) return null;
+      return parts[idx];
+    }
+    return null;
   }
 
-  return parts.filter((p) => p.length > 0).join(" ");
+  return fragments
+    .map((f) => f.content)
+    .filter((c) => c.length > 0)
+    .join(" ");
 }
 
 /**
@@ -188,7 +307,7 @@ export function verseBlockquotePrefix(
   const re = getVerseRegex();
   let match: RegExpExecArray | null;
   while ((match = re.exec(text)) !== null) {
-    if (parseInt(match[0].slice(1, -1), 10) !== verseNumber) continue;
+    if (parseMarkerToken(match[0]).number !== verseNumber) continue;
     const lineStart = text.lastIndexOf("\n", match.index - 1) + 1;
     const prefix = /^(\s*(?:>\s?)+)/.exec(text.slice(lineStart, match.index));
     return prefix ? prefix[1] : "";
@@ -197,50 +316,50 @@ export function verseBlockquotePrefix(
 }
 
 /**
- * Returns the raw markdown source spanning from verse `start`'s marker
- * through the end of verse `end`'s content (exclusive of the next marker).
+ * Returns the raw markdown source covering a verse-number range, as the
+ * *literal document span* from the first marker whose number falls in
+ * [start, end] to the end of the last such marker's content.
  *
- * Used by the hover preview when no part trimming is needed: rendering this
- * span through Obsidian's MarkdownRenderer reproduces the source layout
- * exactly — paragraphs, headings, blockquotes, and inline `[N]` markers
- * (which our own post-processor will then style).
+ * Because the cited verses may be scattered and interleaved (e.g. document
+ * order 6b, 5a, 6a, 7, 5b for a 5:6 reference), the span is bounded by the
+ * earliest and latest in-range markers in *document* order — never stopping
+ * early at a number it happens to meet first. Everything physically between
+ * those bounds is preserved verbatim: headings, blockquotes, inline markers,
+ * and even out-of-range verses (a stray [7] caught in the middle) — all of
+ * which the MarkdownRenderer + our post-processor then style like the reading
+ * view. For ordered, non-repeating verses this is identical to the previous
+ * "start marker → marker after end" behavior.
  *
- * Returns null if `start` is not found in the text.
+ * Returns null if no marker in [start, end] is found.
  */
 export function getVerseRangeRawText(
   text: string,
   start: number,
   end: number
 ): string | null {
-  const re = getVerseRegex();
-  let startPos = -1;
-  let contentEnd = text.length;
-  let endSeen = false;
-  let match: RegExpExecArray | null;
-
-  while ((match = re.exec(text)) !== null) {
-    const num = parseInt(match[0].slice(1, -1), 10);
-
-    if (startPos === -1) {
-      if (num === start) {
-        // Include the line's blockquote/whitespace lead-in so a `> ` (or
-        // `>[N]`) prefix is preserved and the first verse keeps its quote.
-        startPos = lineLeadStart(text, match.index);
-        if (start === end) endSeen = true;
-      }
-    } else {
-      if (endSeen) {
-        // Marker immediately after verse `end`. Cut at its line's lead-in so
-        // a dangling `> ` prefix from a blockquoted next verse isn't dragged
-        // in (that stray `> ` would otherwise block trailing-heading strip).
-        contentEnd = lineLeadStart(text, match.index);
-        break;
-      }
-      if (num === end) endSeen = true;
+  const hits = scanMarkers(text);
+  let firstIdx = -1;
+  let lastIdx = -1;
+  for (let i = 0; i < hits.length; i++) {
+    if (hits[i].number >= start && hits[i].number <= end) {
+      if (firstIdx === -1) firstIdx = i;
+      lastIdx = i;
     }
   }
 
-  if (startPos === -1) return null;
+  if (firstIdx === -1) return null;
+
+  // Include the first marker's blockquote/whitespace lead-in so a `> ` (or
+  // `>[N]`) prefix is preserved and the leading verse keeps its quote.
+  const startPos = lineLeadStart(text, hits[firstIdx].index);
+  // End at the marker immediately following the last in-range one, cut at its
+  // line lead-in so a dangling `> ` prefix from a blockquoted next verse
+  // isn't dragged in (it would otherwise block trailing-heading strip).
+  const contentEnd =
+    lastIdx + 1 < hits.length
+      ? lineLeadStart(text, hits[lastIdx + 1].index)
+      : text.length;
+
   const raw = text.slice(startPos, contentEnd).trimEnd();
   return stripTrailingHeadingsBeforeNextVerse(raw);
 }
@@ -385,7 +504,7 @@ export function findVerseLine(
   const re = getVerseRegex();
   let match: RegExpExecArray | null;
   while ((match = re.exec(text)) !== null) {
-    const num = parseInt(match[0].slice(1, -1), 10);
+    const num = parseMarkerToken(match[0]).number;
     if (num === verseNumber) {
       let line = 0;
       for (let i = 0; i < match.index; i++) {
@@ -436,7 +555,7 @@ export function continuationPartAnchor(
     }
     const marker = getVerseRegex().exec(lines[i]);
     if (marker) {
-      verseNumber = parseInt(marker[0].slice(1, -1), 10);
+      verseNumber = parseMarkerToken(marker[0]).number;
       break;
     }
   }
@@ -470,16 +589,40 @@ export function partHasAnchor(
   part: string | null
 ): boolean {
   if (part === null) return true;
+
+  // An authored marker like [5a] is itself an anchor (the post-processor
+  // gives its span id="verse-5a"), so explicit parts are always anchored.
+  if (scanMarkers(text).some((h) => h.number === verseNumber && h.part === part)) {
+    return true;
+  }
+
   const span = findVerseSpan(text, verseNumber);
   if (!span) return false;
   const segments = versePartSegments(text.slice(span.start, span.end));
-  const target = part.charCodeAt(0) - "a".charCodeAt(0);
+  const target = partToIndex(part);
   let segmentStart = 0;
   for (const segment of segments) {
     if (segmentStart === target) return true;
     segmentStart += segment.length;
   }
   return false;
+}
+
+/**
+ * Returns the authored part of the FIRST marker carrying `verseNumber`
+ * (e.g. "a" when the verse is written as scattered [5a]…[5b]…), or null when
+ * the first occurrence is a plain `[N]` marker or the verse is absent.
+ *
+ * Navigation uses this to find a real scroll anchor: a whole-verse reference
+ * (verse-5) to a verse with no plain `[5]` marker must fall back to the first
+ * fragment's id (verse-5a) since `verse-5` itself never appears in the DOM.
+ */
+export function firstFragmentPart(
+  text: string,
+  verseNumber: number
+): string | null {
+  const first = scanMarkers(text).find((h) => h.number === verseNumber);
+  return first ? first.part : null;
 }
 
 /**
@@ -490,8 +633,7 @@ export function getAllVerseNumbers(text: string): number[] {
   const numbers: number[] = [];
   let match: RegExpExecArray | null;
   while ((match = re.exec(text)) !== null) {
-    const num = parseInt(match[0].replace(/\[|\]/g, ""), 10);
-    numbers.push(num);
+    numbers.push(parseMarkerToken(match[0]).number);
   }
   return numbers;
 }
@@ -500,9 +642,11 @@ export function getAllVerseNumbers(text: string): number[] {
  * Supported verse-reference fragment syntaxes
  * ---------------------------------------------------------------------------
  * Single verse (always recognized):
- *     [[File#verse-3]]          full verse
- *     [[File#verse-3a]]         heading-split part "a" (first segment)
- *     [[File#verse-3b]]         heading-split part "b" (second segment), etc.
+ *     [[File#verse-3]]          full verse (all fragments if it is scattered)
+ *     [[File#verse-3a]]         part "a" — an authored [3a] marker if present,
+ *                               else heading/footnote-split segment "a"
+ *     [[File#verse-3b]]         part "b" (and so on; parts may be multi-letter
+ *                               for authored markers like [12bc])
  *
  * Range (always recognized):
  *     [[File#verse-3:7]]        verses 3..7 inclusive
@@ -541,8 +685,8 @@ export function parseVerseRange(
   allowShorthand: boolean = false
 ): { start: number; startPart: string | null; end: number; endPart: string | null } | null {
   const pattern = allowShorthand
-    ? /^(?:verse-)?(\d+)([a-z])?:(\d+)([a-z])?$/
-    : /^verse-(\d+)([a-z])?:(\d+)([a-z])?$/;
+    ? /^(?:verse-)?(\d+)([a-z]+)?:(\d+)([a-z]+)?$/
+    : /^verse-(\d+)([a-z]+)?:(\d+)([a-z]+)?$/;
   const m = pattern.exec(fragment);
   if (!m) return null;
   return {
@@ -555,7 +699,8 @@ export function parseVerseRange(
 
 /**
  * Parses a single-verse fragment and returns { verse, part }.
- * `part` is a single lowercase letter (a/b/c/…) or null for the full verse.
+ * `part` is one or more lowercase letters (a/b/c/…, or authored multi-letter
+ * labels like "bc") or null for the full verse.
  *
  * Always accepts the explicit "verse-3" and "verse-3a".
  * When `allowShorthand` is true, also accepts "3" and "3a".
@@ -566,8 +711,8 @@ export function parseVerseSingle(
   allowShorthand: boolean = false
 ): { verse: number; part: string | null } | null {
   const pattern = allowShorthand
-    ? /^(?:verse-)?(\d+)([a-z])?$/
-    : /^verse-(\d+)([a-z])?$/;
+    ? /^(?:verse-)?(\d+)([a-z]+)?$/
+    : /^verse-(\d+)([a-z]+)?$/;
   const m = pattern.exec(fragment);
   if (!m) return null;
   return {
@@ -581,13 +726,13 @@ export function parseVerseSingle(
  * with part suffixes on either endpoint ("verse-Na:M", "verse-N:Mb",
  * "verse-Na:Mb").
  */
-export const VERSE_FRAGMENT_TEST_STRICT = /^verse-\d+[a-z]?(?::\d+[a-z]?)?$/;
+export const VERSE_FRAGMENT_TEST_STRICT = /^verse-\d+[a-z]*(?::\d+[a-z]*)?$/;
 
 /** Loose: explicit OR shorthand (opt-in). */
-export const VERSE_FRAGMENT_TEST_LOOSE = /^(?:verse-)?\d+[a-z]?(?::\d+[a-z]?)?$/;
+export const VERSE_FRAGMENT_TEST_LOOSE = /^(?:verse-)?\d+[a-z]*(?::\d+[a-z]*)?$/;
 
 /** Strict range test: explicit forms only, with optional part suffixes. */
-export const VERSE_RANGE_FRAGMENT_TEST_STRICT = /^verse-\d+[a-z]?:\d+[a-z]?$/;
+export const VERSE_RANGE_FRAGMENT_TEST_STRICT = /^verse-\d+[a-z]*:\d+[a-z]*$/;
 
 /** Loose range test: explicit OR shorthand range. */
-export const VERSE_RANGE_FRAGMENT_TEST_LOOSE = /^(?:verse-)?\d+[a-z]?:\d+[a-z]?$/;
+export const VERSE_RANGE_FRAGMENT_TEST_LOOSE = /^(?:verse-)?\d+[a-z]*:\d+[a-z]*$/;

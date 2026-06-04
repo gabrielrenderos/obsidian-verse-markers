@@ -6,8 +6,9 @@ Originally built for study notes over scripture, but it works for any document w
 
 ## Features
 
-- **Inline verse markers** — Any token like `[3]` at the start of a line, after a blockquote `>`, or after whitespace is treated as verse 3. Reading view renders it as just the number, colored with the theme's link accent. Live preview is left untouched so it keeps Obsidian's native look.
-- **Wiki-link references** — `[[Gospel of John#verse-3]]` jumps to verse 3 in the target file. Ranges (`verse-3:7`) and heading-split parts (`verse-3a`, `verse-3b`, …) are supported.
+- **Inline verse markers** — Any token like `[3]` (or an authored part like `[3a]`) at the start of a line, after a blockquote `>`, or after whitespace is treated as a verse. Reading view renders it as just the label, colored with the theme's link accent. Live preview is left untouched so it keeps Obsidian's native look.
+- **Wiki-link references** — `[[Gospel of John#verse-3]]` jumps to verse 3 in the target file. Ranges (`verse-3:7`) and parts (`verse-3a`, `verse-3b`, …) are supported, whether a part comes from a heading/footnote split or is written into the marker itself.
+- **Authored verse parts** — markers may carry a part suffix, e.g. `[5a]`, `[5b]`, `[12bc]`. A single canonical verse can be split into scattered, separately-marked pieces (even interleaved with other verses) and still be referenced as a whole or by individual part.
 - **Hover previews for ranges** — hover a `verse-N:M` link to see the quoted verse text inline without opening the file.
 - **Two "Copy reference" commands** — grab a wiki-link for the verse near your cursor, or for a selection spanning multiple verses.
 - **URI protocol handler** — `obsidian://verse-markers?file=<path>&verse=<N>&part=<a>` deep-links into a verse from outside Obsidian.
@@ -28,13 +29,13 @@ No community-store listing yet. Install manually:
 
 ## Authoring verses
 
-Write verse markers as bare `[N]` tokens in Markdown. The parser accepts a marker when:
+Write verse markers as bare `[N]` tokens in Markdown — or `[Na]` to carry an authored part letter (see [Authored verse parts](#authored-verse-parts)). The parser accepts a marker when:
 
 - it is at the start of a line, OR
 - it follows whitespace, OR
 - it follows a blockquote `>`
 
-...and is followed by whitespace or end-of-line. There must be a single space between `]` and the verse content.
+...and is followed by whitespace or end-of-line. There must be a single space between `]` and the verse content. The token is one or more digits, optionally followed by lowercase letters; the required leading digit keeps ordinary brackets such as `[note]` or footnotes `[^1]` from ever being mistaken for a marker.
 
 ```markdown
 [1] In the beginning was the Word, and the Word was with God, and the Word was God.
@@ -98,15 +99,40 @@ An *interior* footnote reference also creates a part boundary — the cut falls 
 
 A footnote only splits when there is verse text on **both** sides of it. Footnotes at the very start or end of a verse, or sitting on a heading line, are *not* boundaries — the verse stays whole through them. Heading and footnote boundaries are lettered together in document order (a, b, c, …), so a verse with one footnote then one heading yields parts a/b (around the footnote) and c (after the heading).
 
+### Authored verse parts
+
+Heading- and footnote-split parts are *derived* — they're a consequence of where headings and footnotes fall. Some texts instead write the part letter **into the marker itself**. This is common in Bibles whose versification differs from the source: a single canonical verse is printed as scattered pieces — `[5a]` here, `[5b]` somewhere else — possibly out of order and interleaved with another verse.
+
+```markdown
+[5a] The Pharaoh said to Joseph: [6b] "They may settle in the region of Goshen…"
+
+### A different account
+
+[5b] Jacob and his sons arrived in Egypt, where Joseph was. [6a] The land of Egypt is at your disposal.
+```
+
+A marker token is a number plus optional lowercase letters (`[5a]`, `[12bc]`). The letter shares the same `verse-Na` addressing as a derived part, so references look identical:
+
+- `[[File#verse-5a]]` → "The Pharaoh said to Joseph:"
+- `[[File#verse-6a]]` → "The land of Egypt is at your disposal."
+
+Referencing behavior with scattered, interleaved fragments:
+
+- **Whole verse** (`[[File#verse-5]]`) gathers every fragment of verse 5 (`5a`, `5b`) into one popover, **each on its own line with its own footnotes**. Headings and any other verses sitting physically between the fragments are left out.
+- **Range** (`[[File#verse-5:6]]`) shows the *literal document span* from the first to the last marker whose number falls in the range — headings, blockquotes, and even an out-of-range verse caught in the middle are preserved verbatim. The span never stops early on a number it meets first, so all parts of the cited verses are included even when they appear out of order (e.g. `6b` before `6a`).
+- **Navigation** to a whole verse with no plain `[5]` marker falls back to the first fragment's anchor (`verse-5a`).
+
+When a verse uses authored part letters, those letters *are* its parts — the verse is not *also* split by any heading or footnote inside a fragment (authored markers win, so there's no double-lettering).
+
 ## Referencing verses
 
 ### Default (always on)
 
 | Syntax                     | Meaning                                   |
 |----------------------------|-------------------------------------------|
-| `[[File#verse-3]]`         | Whole verse 3                             |
-| `[[File#verse-3a]]`        | First heading-split part of verse 3       |
-| `[[File#verse-3b]]`        | Second part (c, d, … for further splits)  |
+| `[[File#verse-3]]`         | Whole verse 3 (all fragments if scattered)|
+| `[[File#verse-3a]]`        | Part "a" — an authored `[3a]` marker if present, else the first heading/footnote-split segment |
+| `[[File#verse-3b]]`        | Part "b" (c, d, … for further parts; multi-letter like `bc` for authored markers) |
 | `[[File#verse-3:7]]`       | Range: verses 3 through 7 inclusive       |
 | `[[File#verse-3b:7]]`      | Range starting at part b of verse 3       |
 | `[[File#verse-3:7c]]`      | Range ending after part c of verse 7      |
@@ -135,7 +161,7 @@ Enable **"Enable shorthand reference syntax"** in settings to also accept:
 
 Available from the command palette (⌘/Ctrl + P):
 
-- **Copy verse reference** — finds the verse marker nearest your cursor and copies `[[CurrentFile#verse-N]]` to the clipboard.
+- **Copy verse reference** — finds the verse marker nearest your cursor and copies `[[CurrentFile#verse-N]]` to the clipboard (an authored part is preserved, e.g. `verse-5a`).
 - **Copy verse range reference** — with a selection that spans two or more verse markers, copies `[[CurrentFile#verse-N:M]]`.
 
 Both commands always emit the explicit `verse-N` form.
@@ -148,6 +174,8 @@ External tools can deep-link into a verse with:
 obsidian://verse-markers?file=<vault-relative-path>&verse=<N>
 obsidian://verse-markers?file=<vault-relative-path>&verse=<N>&part=<letter>
 ```
+
+`verse` may also include the part directly (`verse=5a`); the separate `part` is a convenience for the plain-number form.
 
 Example:
 
@@ -189,7 +217,8 @@ If you want to restyle, drop overrides into a CSS snippet:
 
 - **Marker recognition is boundary-aware.** `[3]` works; `text[3]text` (no whitespace) does not. A marker inside a code block, inline code, or math is skipped entirely.
 - **Skipped containers in reading view:** `<a>`, `<code>`, `<pre>`, `<math>`, `<mjx-container>`, `<table>`, `<img>`, and anything with `.math`, `.internal-embed`, or `.external-embed`.
-- **Verse uniqueness.** The plugin does not enforce unique verse numbers within a file. If you write `[3]` twice, the first one wins for navigation.
+- **Verse uniqueness.** The plugin does not enforce unique verse *numbers* within a file. Repeating the same number with distinct part letters (`[5a]`, `[5b]`) is the intended way to author a scattered verse. Repeating a plain `[3]` with no part is not — for navigation the first one wins, though a whole-verse reference still gathers them all.
+- **Authored parts beat derived parts.** When a verse carries authored part letters, those are its parts; it is not *also* split by a heading or footnote inside a fragment.
 - **Post-processor is idempotent.** Running it twice on the same DOM is a no-op (the rewritten spans contain no raw `[N]` tokens to match).
 - **Part "a" vs. heading-split continuation.** When a block already contains a verse marker, that marker's span carries the `verse-N` id. Continuation blocks (part b, c, …) get an injected invisible anchor span at their start.
 

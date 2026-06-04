@@ -6,6 +6,7 @@
 import { MarkdownPostProcessorContext } from "obsidian";
 import {
   getVerseRegex,
+  parseMarkerToken,
   continuationPartAnchor,
   VERSE_FRAGMENT_TEST_STRICT,
   VERSE_FRAGMENT_TEST_LOOSE,
@@ -39,9 +40,9 @@ function isInsideSkipped(node: Node): boolean {
 }
 
 /**
- * Processes a single Text node: replaces each verse marker "[N]" token
- * with a single span containing just the number N (brackets are dropped).
- * The span carries id="verse-N" for anchor navigation.
+ * Processes a single Text node: replaces each verse marker "[N]"/"[Na]" token
+ * with a single span containing just its label N (or "Na", brackets dropped).
+ * The span carries id="verse-N" (or "verse-Na") for anchor navigation.
  * Returns true if any replacements were made.
  */
 function processTextNode(textNode: Text): boolean {
@@ -71,12 +72,14 @@ function processTextNode(textNode: Text): boolean {
       fragment.appendChild(document.createTextNode(text.slice(lastIndex, start)));
     }
 
-    // Strip the brackets: render only the digits, carrying the verse id.
-    const digits = token.slice(1, -1);
+    // Strip the brackets: render only the label (number + any authored part
+    // letters), carrying the matching verse id.
+    const { number, part } = parseMarkerToken(token);
+    const label = `${number}${part ?? ""}`;
     const markerEl = document.createElement("span");
     markerEl.className = "verse-marker";
-    markerEl.id = `verse-${digits}`;
-    markerEl.textContent = digits;
+    markerEl.id = `verse-${label}`;
+    markerEl.textContent = label;
 
     fragment.appendChild(markerEl);
     lastIndex = end;

@@ -4,17 +4,24 @@
  */
 
 import { Editor, Notice } from "obsidian";
-import { getVerseRegex } from "./detection";
+import { getVerseRegex, parseMarkerToken } from "./detection";
 import type VerseMarkersPlugin from "./main";
 
+/** Renders a marker token's value as a reference label ("5" or "5a"). */
+function markerLabel(token: string): string {
+  const { number, part } = parseMarkerToken(token);
+  return `${number}${part ?? ""}`;
+}
+
 /**
- * Returns the verse number of the marker nearest to the given cursor offset
- * within the full document text, or null if none found.
+ * Returns the label of the verse marker nearest to the given cursor offset
+ * within the full document text ("5" or, for an authored part, "5a"), or null
+ * if none found.
  */
-function nearestVerseAtOffset(text: string, cursorOffset: number): number | null {
+function nearestVerseAtOffset(text: string, cursorOffset: number): string | null {
   const re = getVerseRegex();
   let match: RegExpExecArray | null;
-  let bestNum: number | null = null;
+  let best: string | null = null;
   let bestDist = Infinity;
 
   while ((match = re.exec(text)) !== null) {
@@ -23,29 +30,29 @@ function nearestVerseAtOffset(text: string, cursorOffset: number): number | null
     const dist = Math.min(Math.abs(cursorOffset - start), Math.abs(cursorOffset - end));
     if (dist < bestDist) {
       bestDist = dist;
-      bestNum = parseInt(match[0].slice(1, -1), 10);
+      best = markerLabel(match[0]);
     }
   }
 
-  return bestNum;
+  return best;
 }
 
 /**
- * Returns the first and last verse numbers found within the selected text range,
- * or null if fewer than two distinct markers exist.
+ * Returns the first and last verse marker labels found within the selected
+ * text range ("5"/"5a"), or null if fewer than two markers exist.
  */
 function verseRangeInSelection(
   text: string,
   selFrom: number,
   selTo: number
-): { first: number; last: number } | null {
+): { first: string; last: string } | null {
   const slice = text.slice(selFrom, selTo);
   const re = getVerseRegex();
-  const found: number[] = [];
+  const found: string[] = [];
   let match: RegExpExecArray | null;
 
   while ((match = re.exec(slice)) !== null) {
-    found.push(parseInt(match[0].slice(1, -1), 10));
+    found.push(markerLabel(match[0]));
   }
 
   if (found.length < 2) return null;

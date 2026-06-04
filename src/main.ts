@@ -66,10 +66,12 @@ export default class VerseMarkersPlugin extends Plugin {
       const file = this.app.vault.getAbstractFileByPath(filePath);
       if (!(file instanceof TFile)) return;
 
-      const verseNum = parseInt(verse, 10);
-      if (isNaN(verseNum)) return;
-
-      const part = params["part"];
+      // Accept a numeric verse ("5") or one carrying an authored part ("5a"),
+      // plus an optional separate &part= for the plain-number form.
+      const vm = /^(\d+)([a-z]*)$/.exec(verse);
+      if (!vm) return;
+      const verseNum = parseInt(vm[1], 10);
+      const part = vm[2] || params["part"] || "";
       const fragment = part ? `verse-${verseNum}${part}` : `verse-${verseNum}`;
       await resolveVerseLink(this.app, file, fragment);
     });

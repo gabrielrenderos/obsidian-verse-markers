@@ -26,7 +26,9 @@ import {
 import {
   appendMissingFootnoteDefinitions,
   findVerseLine,
+  firstFragmentPart,
   getVerseContent,
+  getVerseFragments,
   getVerseParts,
   getVerseRangeRawText,
   parseVerseRange,
@@ -210,8 +212,16 @@ export async function buildRangePreviewMarkdown(
 
 /**
  * Builds the markdown source for a single-verse preview.
- * `part` is an optional lowercase letter ("a", "b", …) selecting a
- * heading-split sub-part. Returns null if the verse or part is missing.
+ *
+ * `part` (optional) selects a specific sub-part — an authored [Na] fragment if
+ * one exists, else a heading/footnote-split segment. Returns null if the verse
+ * or part is missing.
+ *
+ * For a whole-verse reference (part null) to a verse the editor split into
+ * scattered fragments ([5a]…[5b]…), each fragment is rendered as its own
+ * block — labeled with its own marker and kept on a separate line — rather
+ * than joined, with the heading and any verses physically between them
+ * omitted. A plain `[N]` verse stays a single block exactly as before.
  */
 export async function buildSinglePreviewMarkdown(
   app: App,
@@ -220,12 +230,26 @@ export async function buildSinglePreviewMarkdown(
   part: string | null
 ): Promise<string | null> {
   const content = await app.vault.cachedRead(file);
-  const verseText = getVerseContent(content, verse, part);
-  if (verseText === null || verseText.length === 0) return null;
-  const label = part ? `${verse}${part}` : `${verse}`;
-  const line = `${verseMarkerLabel(label)} ${verseText}`;
-  const body = applyBlockquotePrefix(line, verseBlockquotePrefix(content, verse));
-  return appendMissingFootnoteDefinitions(body, content);
+  const prefix = verseBlockquotePrefix(content, verse);
+
+  if (part !== null) {
+    const verseText = getVerseContent(content, verse, part);
+    if (verseText === null || verseText.length === 0) return null;
+    const line = `${verseMarkerLabel(`${verse}${part}`)} ${verseText}`;
+    const body = applyBlockquotePrefix(line, prefix);
+    return appendMissingFootnoteDefinitions(body, content);
+  }
+
+  const fragments = getVerseFragments(content, verse);
+  const blocks = fragments
+    .filter((f) => f.content.length > 0)
+    .map((f) => {
+      const label = f.part ? `${verse}${f.part}` : `${verse}`;
+      const line = `${verseMarkerLabel(label)} ${f.content}`;
+      return applyBlockquotePrefix(line, prefix);
+    });
+  if (blocks.length === 0) return null;
+  return appendMissingFootnoteDefinitions(blocks.join("\n\n"), content);
 }
 
 /**
@@ -674,7 +698,12 @@ export async function resolveVerseLink(
   const primaryId = startPart
     ? `verse-${startVerse}${startPart}`
     : `verse-${startVerse}`;
-  const fallbackId = `verse-${startVerse}`;
+  // A whole-verse reference to a verse authored as scattered fragments has no
+  // plain `verse-N` element (only `verse-Na`, `verse-Nb`, …). Fall back to the
+  // first fragment's anchor so navigation still lands on the verse.
+  const firstPart = firstFragmentPart(content, startVerse);
+  const fallbackId =
+    !startPart && firstPart ? `verse-${startVerse}${firstPart}` : `verse-${startVerse}`;
 
   // Decide whether to ask Obsidian to pre-scroll via eState. eState is
   // necessary when the verse anchor isn't currently rendered (Obsidian's
@@ -1158,7 +1187,7 @@ function collectInRangeAnchors(
   const inRange: HTMLElement[] = [];
   for (let i = 0; i < all.length; i++) {
     const el = all[i];
-    const m = /^verse-(\d+)([a-z])?$/.exec(el.id);
+    const m = /^verse-(\d+)([a-z]+)?$/.exec(el.id);
     if (!m) continue;
     const n = parseInt(m[1], 10);
     const part = m[2] ?? null;
@@ -1262,7 +1291,7 @@ function buildVerseTextRanges(
   const allValidAnchors: HTMLElement[] = [];
   const all = document.querySelectorAll<HTMLElement>('[id^="verse-"]');
   for (let i = 0; i < all.length; i++) {
-    if (/^verse-\d+[a-z]?$/.test(all[i].id)) allValidAnchors.push(all[i]);
+    if (/^verse-\d+[a-z]*$/.test(all[i].id)) allValidAnchors.push(all[i]);
   }
 
   const inRangeSet = new Set<HTMLElement>(inRange);

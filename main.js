@@ -31,9 +31,33 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian4 = require("obsidian");
 
 // src/detection.ts
-var VERSE_MARKER_REGEX = /(?:^|(?<=[>\s]))\[\d+\](?=\s|$)/gm;
+var VERSE_MARKER_REGEX = /(?:^|(?<=[>\s]))\[\d+[a-z]*\](?=\s|$)/gm;
 function getVerseRegex() {
   return new RegExp(VERSE_MARKER_REGEX.source, VERSE_MARKER_REGEX.flags);
+}
+function parseMarkerToken(token) {
+  const m = /^\[(\d+)([a-z]*)\]$/.exec(token);
+  if (!m)
+    return { number: NaN, part: null };
+  return { number: parseInt(m[1], 10), part: m[2] === "" ? null : m[2] };
+}
+function partToIndex(part) {
+  return part.charCodeAt(0) - "a".charCodeAt(0);
+}
+function scanMarkers(text) {
+  const re = getVerseRegex();
+  const hits = [];
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const { number, part } = parseMarkerToken(m[0]);
+    hits.push({
+      number,
+      part,
+      index: m.index,
+      afterMarker: m.index + m[0].length
+    });
+  }
+  return hits;
 }
 var HEADING_LINE_REGEX = /^\s*#{1,6}\s+\S.*$/;
 function stripBlockquoteMarker(line) {
@@ -77,7 +101,7 @@ function findVerseSpan(text, verseNumber) {
   let spanEnd = text.length;
   let match;
   while ((match = re.exec(text)) !== null) {
-    const num = parseInt(match[0].slice(1, -1), 10);
+    const num = parseMarkerToken(match[0]).number;
     const afterMarker = match.index + match[0].length;
     if (spanStart === -1 && num === verseNumber) {
       if (text[afterMarker] !== " ")
@@ -98,23 +122,49 @@ function getVerseParts(text, verseNumber) {
     return null;
   return splitVerseParts(text.slice(span.start, span.end));
 }
-function getVerseContent(text, verseNumber, part = null) {
-  const parts = getVerseParts(text, verseNumber);
-  if (!parts)
-    return null;
-  if (part) {
-    const idx = part.charCodeAt(0) - "a".charCodeAt(0);
-    if (idx < 0 || idx >= parts.length)
-      return null;
-    return parts[idx];
+function getVerseFragments(text, verseNumber) {
+  const hits = scanMarkers(text);
+  const fragments = [];
+  for (let i = 0; i < hits.length; i++) {
+    if (hits[i].number !== verseNumber)
+      continue;
+    if (text[hits[i].afterMarker] !== " ")
+      continue;
+    const contentStart = hits[i].afterMarker + 1;
+    const contentEnd = i + 1 < hits.length ? hits[i + 1].index : text.length;
+    const raw = text.slice(contentStart, contentEnd);
+    const content = splitVerseParts(raw).filter((p) => p.length > 0).join(" ");
+    fragments.push({ part: hits[i].part, content });
   }
-  return parts.filter((p) => p.length > 0).join(" ");
+  return fragments;
+}
+function getVerseContent(text, verseNumber, part = null) {
+  const fragments = getVerseFragments(text, verseNumber);
+  if (fragments.length === 0)
+    return null;
+  if (part !== null) {
+    const explicit = fragments.find((f) => f.part === part);
+    if (explicit)
+      return explicit.content;
+    if (fragments.length === 1 && fragments[0].part === null) {
+      const span = findVerseSpan(text, verseNumber);
+      if (!span)
+        return null;
+      const parts = splitVerseParts(text.slice(span.start, span.end));
+      const idx = partToIndex(part);
+      if (idx < 0 || idx >= parts.length)
+        return null;
+      return parts[idx];
+    }
+    return null;
+  }
+  return fragments.map((f) => f.content).filter((c) => c.length > 0).join(" ");
 }
 function verseBlockquotePrefix(text, verseNumber) {
   const re = getVerseRegex();
   let match;
   while ((match = re.exec(text)) !== null) {
-    if (parseInt(match[0].slice(1, -1), 10) !== verseNumber)
+    if (parseMarkerToken(match[0]).number !== verseNumber)
       continue;
     const lineStart = text.lastIndexOf("\n", match.index - 1) + 1;
     const prefix = /^(\s*(?:>\s?)+)/.exec(text.slice(lineStart, match.index));
@@ -123,30 +173,20 @@ function verseBlockquotePrefix(text, verseNumber) {
   return "";
 }
 function getVerseRangeRawText(text, start, end) {
-  const re = getVerseRegex();
-  let startPos = -1;
-  let contentEnd = text.length;
-  let endSeen = false;
-  let match;
-  while ((match = re.exec(text)) !== null) {
-    const num = parseInt(match[0].slice(1, -1), 10);
-    if (startPos === -1) {
-      if (num === start) {
-        startPos = lineLeadStart(text, match.index);
-        if (start === end)
-          endSeen = true;
-      }
-    } else {
-      if (endSeen) {
-        contentEnd = lineLeadStart(text, match.index);
-        break;
-      }
-      if (num === end)
-        endSeen = true;
+  const hits = scanMarkers(text);
+  let firstIdx = -1;
+  let lastIdx = -1;
+  for (let i = 0; i < hits.length; i++) {
+    if (hits[i].number >= start && hits[i].number <= end) {
+      if (firstIdx === -1)
+        firstIdx = i;
+      lastIdx = i;
     }
   }
-  if (startPos === -1)
+  if (firstIdx === -1)
     return null;
+  const startPos = lineLeadStart(text, hits[firstIdx].index);
+  const contentEnd = lastIdx + 1 < hits.length ? lineLeadStart(text, hits[lastIdx + 1].index) : text.length;
   const raw = text.slice(startPos, contentEnd).trimEnd();
   return stripTrailingHeadingsBeforeNextVerse(raw);
 }
@@ -229,7 +269,7 @@ function findVerseLine(text, verseNumber) {
   const re = getVerseRegex();
   let match;
   while ((match = re.exec(text)) !== null) {
-    const num = parseInt(match[0].slice(1, -1), 10);
+    const num = parseMarkerToken(match[0]).number;
     if (num === verseNumber) {
       let line = 0;
       for (let i = 0; i < match.index; i++) {
@@ -252,7 +292,7 @@ function continuationPartAnchor(text, blockStartLine) {
     }
     const marker = getVerseRegex().exec(lines[i]);
     if (marker) {
-      verseNumber = parseInt(marker[0].slice(1, -1), 10);
+      verseNumber = parseMarkerToken(marker[0]).number;
       break;
     }
   }
@@ -271,11 +311,14 @@ function continuationPartAnchor(text, blockStartLine) {
 function partHasAnchor(text, verseNumber, part) {
   if (part === null)
     return true;
+  if (scanMarkers(text).some((h) => h.number === verseNumber && h.part === part)) {
+    return true;
+  }
   const span = findVerseSpan(text, verseNumber);
   if (!span)
     return false;
   const segments = versePartSegments(text.slice(span.start, span.end));
-  const target = part.charCodeAt(0) - "a".charCodeAt(0);
+  const target = partToIndex(part);
   let segmentStart = 0;
   for (const segment of segments) {
     if (segmentStart === target)
@@ -284,9 +327,13 @@ function partHasAnchor(text, verseNumber, part) {
   }
   return false;
 }
+function firstFragmentPart(text, verseNumber) {
+  const first = scanMarkers(text).find((h) => h.number === verseNumber);
+  return first ? first.part : null;
+}
 function parseVerseRange(fragment, allowShorthand = false) {
   var _a, _b;
-  const pattern = allowShorthand ? /^(?:verse-)?(\d+)([a-z])?:(\d+)([a-z])?$/ : /^verse-(\d+)([a-z])?:(\d+)([a-z])?$/;
+  const pattern = allowShorthand ? /^(?:verse-)?(\d+)([a-z]+)?:(\d+)([a-z]+)?$/ : /^verse-(\d+)([a-z]+)?:(\d+)([a-z]+)?$/;
   const m = pattern.exec(fragment);
   if (!m)
     return null;
@@ -299,7 +346,7 @@ function parseVerseRange(fragment, allowShorthand = false) {
 }
 function parseVerseSingle(fragment, allowShorthand = false) {
   var _a;
-  const pattern = allowShorthand ? /^(?:verse-)?(\d+)([a-z])?$/ : /^verse-(\d+)([a-z])?$/;
+  const pattern = allowShorthand ? /^(?:verse-)?(\d+)([a-z]+)?$/ : /^verse-(\d+)([a-z]+)?$/;
   const m = pattern.exec(fragment);
   if (!m)
     return null;
@@ -308,8 +355,8 @@ function parseVerseSingle(fragment, allowShorthand = false) {
     part: (_a = m[2]) != null ? _a : null
   };
 }
-var VERSE_FRAGMENT_TEST_STRICT = /^verse-\d+[a-z]?(?::\d+[a-z]?)?$/;
-var VERSE_FRAGMENT_TEST_LOOSE = /^(?:verse-)?\d+[a-z]?(?::\d+[a-z]?)?$/;
+var VERSE_FRAGMENT_TEST_STRICT = /^verse-\d+[a-z]*(?::\d+[a-z]*)?$/;
+var VERSE_FRAGMENT_TEST_LOOSE = /^(?:verse-)?\d+[a-z]*(?::\d+[a-z]*)?$/;
 
 // src/postprocessor.ts
 var SKIP_TAGS = /* @__PURE__ */ new Set([
@@ -361,11 +408,12 @@ function processTextNode(textNode) {
     if (start > lastIndex) {
       fragment.appendChild(document.createTextNode(text.slice(lastIndex, start)));
     }
-    const digits = token.slice(1, -1);
+    const { number, part } = parseMarkerToken(token);
+    const label = `${number}${part != null ? part : ""}`;
     const markerEl = document.createElement("span");
     markerEl.className = "verse-marker";
-    markerEl.id = `verse-${digits}`;
-    markerEl.textContent = digits;
+    markerEl.id = `verse-${label}`;
+    markerEl.textContent = label;
     fragment.appendChild(markerEl);
     lastIndex = end;
   }
@@ -438,10 +486,14 @@ function versePostProcessor(el, ctx) {
 
 // src/commands.ts
 var import_obsidian = require("obsidian");
+function markerLabel(token) {
+  const { number, part } = parseMarkerToken(token);
+  return `${number}${part != null ? part : ""}`;
+}
 function nearestVerseAtOffset(text, cursorOffset) {
   const re = getVerseRegex();
   let match;
-  let bestNum = null;
+  let best = null;
   let bestDist = Infinity;
   while ((match = re.exec(text)) !== null) {
     const start = match.index;
@@ -449,10 +501,10 @@ function nearestVerseAtOffset(text, cursorOffset) {
     const dist = Math.min(Math.abs(cursorOffset - start), Math.abs(cursorOffset - end));
     if (dist < bestDist) {
       bestDist = dist;
-      bestNum = parseInt(match[0].slice(1, -1), 10);
+      best = markerLabel(match[0]);
     }
   }
-  return bestNum;
+  return best;
 }
 function verseRangeInSelection(text, selFrom, selTo) {
   const slice = text.slice(selFrom, selTo);
@@ -460,7 +512,7 @@ function verseRangeInSelection(text, selFrom, selTo) {
   const found = [];
   let match;
   while ((match = re.exec(slice)) !== null) {
-    found.push(parseInt(match[0].slice(1, -1), 10));
+    found.push(markerLabel(match[0]));
   }
   if (found.length < 2)
     return null;
@@ -550,7 +602,7 @@ function cancelHideUpChain(node) {
     cur = cur.parent;
   }
 }
-function partToIndex(part) {
+function partToIndex2(part) {
   return part.charCodeAt(0) - "a".charCodeAt(0);
 }
 function verseMarkerLabel(label) {
@@ -580,8 +632,8 @@ async function buildRangePreviewMarkdown(app, file, start, end, maxVerses, start
       const parts = getVerseParts(content, n);
       if (!parts)
         continue;
-      const sliceStart = trimStart ? partToIndex(startPart) : 0;
-      const sliceEnd = trimEnd ? partToIndex(endPart) + 1 : parts.length;
+      const sliceStart = trimStart ? partToIndex2(startPart) : 0;
+      const sliceEnd = trimEnd ? partToIndex2(endPart) + 1 : parts.length;
       if (sliceStart < 0 || sliceStart >= parts.length)
         continue;
       if (sliceEnd <= sliceStart)
@@ -607,13 +659,24 @@ async function buildRangePreviewMarkdown(app, file, start, end, maxVerses, start
 }
 async function buildSinglePreviewMarkdown(app, file, verse, part) {
   const content = await app.vault.cachedRead(file);
-  const verseText = getVerseContent(content, verse, part);
-  if (verseText === null || verseText.length === 0)
+  const prefix = verseBlockquotePrefix(content, verse);
+  if (part !== null) {
+    const verseText = getVerseContent(content, verse, part);
+    if (verseText === null || verseText.length === 0)
+      return null;
+    const line = `${verseMarkerLabel(`${verse}${part}`)} ${verseText}`;
+    const body = applyBlockquotePrefix(line, prefix);
+    return appendMissingFootnoteDefinitions(body, content);
+  }
+  const fragments = getVerseFragments(content, verse);
+  const blocks = fragments.filter((f) => f.content.length > 0).map((f) => {
+    const label = f.part ? `${verse}${f.part}` : `${verse}`;
+    const line = `${verseMarkerLabel(label)} ${f.content}`;
+    return applyBlockquotePrefix(line, prefix);
+  });
+  if (blocks.length === 0)
     return null;
-  const label = part ? `${verse}${part}` : `${verse}`;
-  const line = `${verseMarkerLabel(label)} ${verseText}`;
-  const body = applyBlockquotePrefix(line, verseBlockquotePrefix(content, verse));
-  return appendMissingFootnoteDefinitions(body, content);
+  return appendMissingFootnoteDefinitions(blocks.join("\n\n"), content);
 }
 var HIDE_DELAY_MS = 200;
 var POPOVER_GAP_PX = 4;
@@ -886,7 +949,8 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
     endPart = null;
   const targetLine = findVerseLine(content, startVerse);
   const primaryId = startPart ? `verse-${startVerse}${startPart}` : `verse-${startVerse}`;
-  const fallbackId = `verse-${startVerse}`;
+  const firstPart = firstFragmentPart(content, startVerse);
+  const fallbackId = !startPart && firstPart ? `verse-${startVerse}${firstPart}` : `verse-${startVerse}`;
   const sameFileOpen = leaf.view instanceof import_obsidian2.MarkdownView && leaf.view.file === file;
   const anchorAlreadyMounted = sameFileOpen && (document.getElementById(primaryId) !== null || document.getElementById(fallbackId) !== null);
   const needForcedScroll = !anchorAlreadyMounted && targetLine !== null;
@@ -1123,7 +1187,7 @@ function collectInRangeAnchors(startVerse, startPart, endVerse, endPart) {
   const inRange = [];
   for (let i = 0; i < all.length; i++) {
     const el = all[i];
-    const m = /^verse-(\d+)([a-z])?$/.exec(el.id);
+    const m = /^verse-(\d+)([a-z]+)?$/.exec(el.id);
     if (!m)
       continue;
     const n = parseInt(m[1], 10);
@@ -1172,7 +1236,7 @@ function buildVerseTextRanges(startVerse, startPart, endVerse, endPart) {
   const allValidAnchors = [];
   const all = document.querySelectorAll('[id^="verse-"]');
   for (let i = 0; i < all.length; i++) {
-    if (/^verse-\d+[a-z]?$/.test(all[i].id))
+    if (/^verse-\d+[a-z]*$/.test(all[i].id))
       allValidAnchors.push(all[i]);
   }
   const inRangeSet = new Set(inRange);
@@ -1280,10 +1344,11 @@ var VerseMarkersPlugin = class extends import_obsidian4.Plugin {
       const file = this.app.vault.getAbstractFileByPath(filePath);
       if (!(file instanceof import_obsidian4.TFile))
         return;
-      const verseNum = parseInt(verse, 10);
-      if (isNaN(verseNum))
+      const vm = /^(\d+)([a-z]*)$/.exec(verse);
+      if (!vm)
         return;
-      const part = params["part"];
+      const verseNum = parseInt(vm[1], 10);
+      const part = vm[2] || params["part"] || "";
       const fragment = part ? `verse-${verseNum}${part}` : `verse-${verseNum}`;
       await resolveVerseLink(this.app, file, fragment);
     });
