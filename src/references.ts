@@ -32,6 +32,7 @@ import {
   parseVerseRange,
   parseVerseSingle,
   partHasAnchor,
+  verseBlockquotePrefix,
 } from "./detection";
 import { collectVerseAnchors } from "./postprocessor";
 import type VerseMarkersPlugin from "./main";
@@ -123,6 +124,20 @@ function verseMarkerLabel(label: string): string {
 }
 
 /**
+ * Re-wraps `text` in a blockquote by prefixing every line with `prefix`
+ * (e.g. "> "). A no-op when `prefix` is empty, so non-blockquote verses are
+ * left untouched. Restores the quote-block styling that verse-content
+ * synthesis drops (the extractor strips `>` markers).
+ */
+function applyBlockquotePrefix(text: string, prefix: string): string {
+  if (!prefix) return text;
+  return text
+    .split("\n")
+    .map((line) => `${prefix}${line}`)
+    .join("\n");
+}
+
+/**
  * Builds the markdown source for a verse range preview.
  *
  * `startPart` and `endPart` (if given) trim the endpoints to a specific
@@ -184,7 +199,8 @@ export async function buildRangePreviewMarkdown(
       if (verseText === null) continue;
     }
 
-    blocks.push(`${verseMarkerLabel(label)} ${verseText}`);
+    const line = `${verseMarkerLabel(label)} ${verseText}`;
+    blocks.push(applyBlockquotePrefix(line, verseBlockquotePrefix(content, n)));
   }
 
   if (blocks.length === 0) return null;
@@ -207,7 +223,8 @@ export async function buildSinglePreviewMarkdown(
   const verseText = getVerseContent(content, verse, part);
   if (verseText === null || verseText.length === 0) return null;
   const label = part ? `${verse}${part}` : `${verse}`;
-  const body = `${verseMarkerLabel(label)} ${verseText}`;
+  const line = `${verseMarkerLabel(label)} ${verseText}`;
+  const body = applyBlockquotePrefix(line, verseBlockquotePrefix(content, verse));
   return appendMissingFootnoteDefinitions(body, content);
 }
 

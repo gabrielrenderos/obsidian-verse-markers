@@ -110,6 +110,18 @@ function getVerseContent(text, verseNumber, part = null) {
   }
   return parts.filter((p) => p.length > 0).join(" ");
 }
+function verseBlockquotePrefix(text, verseNumber) {
+  const re = getVerseRegex();
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    if (parseInt(match[0].slice(1, -1), 10) !== verseNumber)
+      continue;
+    const lineStart = text.lastIndexOf("\n", match.index - 1) + 1;
+    const prefix = /^(\s*(?:>\s?)+)/.exec(text.slice(lineStart, match.index));
+    return prefix ? prefix[1] : "";
+  }
+  return "";
+}
 function getVerseRangeRawText(text, start, end) {
   const re = getVerseRegex();
   let startPos = -1;
@@ -120,13 +132,13 @@ function getVerseRangeRawText(text, start, end) {
     const num = parseInt(match[0].slice(1, -1), 10);
     if (startPos === -1) {
       if (num === start) {
-        startPos = match.index > 0 && text[match.index - 1] === ">" ? match.index - 1 : match.index;
+        startPos = lineLeadStart(text, match.index);
         if (start === end)
           endSeen = true;
       }
     } else {
       if (endSeen) {
-        contentEnd = match.index;
+        contentEnd = lineLeadStart(text, match.index);
         break;
       }
       if (num === end)
@@ -138,12 +150,17 @@ function getVerseRangeRawText(text, start, end) {
   const raw = text.slice(startPos, contentEnd).trimEnd();
   return stripTrailingHeadingsBeforeNextVerse(raw);
 }
+function lineLeadStart(text, markerIndex) {
+  const lineStart = text.lastIndexOf("\n", markerIndex - 1) + 1;
+  const lead = text.slice(lineStart, markerIndex);
+  return /^\s*(?:>\s?)*$/.test(lead) ? lineStart : markerIndex;
+}
 function stripTrailingHeadingsBeforeNextVerse(raw) {
   const lines = raw.split("\n");
   let end = lines.length;
   while (end > 0) {
     let i = end - 1;
-    while (i >= 0 && /^\s*$/.test(lines[i]))
+    while (i >= 0 && /^\s*$/.test(stripBlockquoteMarker(lines[i])))
       i--;
     if (i < 0) {
       end = 0;
@@ -539,6 +556,11 @@ function partToIndex(part) {
 function verseMarkerLabel(label) {
   return `<span class="verse-marker">${label}</span>`;
 }
+function applyBlockquotePrefix(text, prefix) {
+  if (!prefix)
+    return text;
+  return text.split("\n").map((line) => `${prefix}${line}`).join("\n");
+}
 async function buildRangePreviewMarkdown(app, file, start, end, maxVerses, startPart = null, endPart = null) {
   const content = await app.vault.cachedRead(file);
   const limit = Math.min(end, start + maxVerses - 1);
@@ -575,7 +597,8 @@ async function buildRangePreviewMarkdown(app, file, start, end, maxVerses, start
       if (verseText === null)
         continue;
     }
-    blocks.push(`${verseMarkerLabel(label)} ${verseText}`);
+    const line = `${verseMarkerLabel(label)} ${verseText}`;
+    blocks.push(applyBlockquotePrefix(line, verseBlockquotePrefix(content, n)));
   }
   if (blocks.length === 0)
     return null;
@@ -588,7 +611,8 @@ async function buildSinglePreviewMarkdown(app, file, verse, part) {
   if (verseText === null || verseText.length === 0)
     return null;
   const label = part ? `${verse}${part}` : `${verse}`;
-  const body = `${verseMarkerLabel(label)} ${verseText}`;
+  const line = `${verseMarkerLabel(label)} ${verseText}`;
+  const body = applyBlockquotePrefix(line, verseBlockquotePrefix(content, verse));
   return appendMissingFootnoteDefinitions(body, content);
 }
 var HIDE_DELAY_MS = 200;

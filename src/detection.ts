@@ -172,6 +172,31 @@ export function getVerseContent(
 }
 
 /**
+ * Returns the blockquote prefix (e.g. "> " or "> > " for nested quotes) of
+ * the source line carrying `verseNumber`'s marker, or "" if the verse is
+ * not inside a blockquote.
+ *
+ * Verse-content extraction strips `>` markers so the text reads cleanly,
+ * which means synthesized popover content loses its quote-block styling.
+ * Callers use this to re-wrap that content in the same blockquote level the
+ * source uses, restoring the quote bar in the hover preview.
+ */
+export function verseBlockquotePrefix(
+  text: string,
+  verseNumber: number
+): string {
+  const re = getVerseRegex();
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    if (parseInt(match[0].slice(1, -1), 10) !== verseNumber) continue;
+    const lineStart = text.lastIndexOf("\n", match.index - 1) + 1;
+    const prefix = /^(\s*(?:>\s?)+)/.exec(text.slice(lineStart, match.index));
+    return prefix ? prefix[1] : "";
+  }
+  return "";
+}
+
+/**
  * Returns the raw markdown source spanning from verse `start`'s marker
  * through the end of verse `end`'s content (exclusive of the next marker).
  *
@@ -198,18 +223,17 @@ export function getVerseRangeRawText(
 
     if (startPos === -1) {
       if (num === start) {
-        // If this verse marker is inside a blockquote written as `>[N] ...`,
-        // include the leading `>` so the popover preserves the quote marker.
-        startPos =
-          match.index > 0 && text[match.index - 1] === ">"
-            ? match.index - 1
-            : match.index;
+        // Include the line's blockquote/whitespace lead-in so a `> ` (or
+        // `>[N]`) prefix is preserved and the first verse keeps its quote.
+        startPos = lineLeadStart(text, match.index);
         if (start === end) endSeen = true;
       }
     } else {
       if (endSeen) {
-        // This is the marker immediately after verse `end` — cut here.
-        contentEnd = match.index;
+        // Marker immediately after verse `end`. Cut at its line's lead-in so
+        // a dangling `> ` prefix from a blockquoted next verse isn't dragged
+        // in (that stray `> ` would otherwise block trailing-heading strip).
+        contentEnd = lineLeadStart(text, match.index);
         break;
       }
       if (num === end) endSeen = true;
@@ -219,6 +243,21 @@ export function getVerseRangeRawText(
   if (startPos === -1) return null;
   const raw = text.slice(startPos, contentEnd).trimEnd();
   return stripTrailingHeadingsBeforeNextVerse(raw);
+}
+
+/**
+ * For a verse marker at `markerIndex`, returns the offset where its source
+ * line's blockquote/whitespace lead-in begins, so callers can include that
+ * `> ` prefix (start endpoint) or exclude it (end endpoint) cleanly.
+ *
+ * Falls back to `markerIndex` when the marker sits mid-line after other text
+ * (inline prose verses sharing a line), so neighbouring inline content is
+ * never swept in or cut off.
+ */
+function lineLeadStart(text: string, markerIndex: number): number {
+  const lineStart = text.lastIndexOf("\n", markerIndex - 1) + 1;
+  const lead = text.slice(lineStart, markerIndex);
+  return /^\s*(?:>\s?)*$/.test(lead) ? lineStart : markerIndex;
 }
 
 /**
@@ -236,7 +275,9 @@ function stripTrailingHeadingsBeforeNextVerse(raw: string): string {
   let end = lines.length;
   while (end > 0) {
     let i = end - 1;
-    while (i >= 0 && /^\s*$/.test(lines[i])) i--;
+    // Treat blank and blockquote-only ("> ") lines alike when skipping, so a
+    // trailing heading is still found past empty quote lines in poem verses.
+    while (i >= 0 && /^\s*$/.test(stripBlockquoteMarker(lines[i]))) i--;
     if (i < 0) {
       end = 0;
       break;
