@@ -998,7 +998,7 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
   }
   const anchor = (_b = await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) != null ? _b : activeDocument.getElementById(fallbackId);
   if (anchor) {
-    activeWindow.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
       if (activeDocument.body.contains(anchor)) {
         smoothScrollAnchorToCenter(anchor);
       }
@@ -1142,7 +1142,7 @@ function flashVerseSegments(segments) {
   if (spans.length === 0)
     return;
   activeFlashSpans = spans;
-  activeWindow.requestAnimationFrame(() => {
+  window.requestAnimationFrame(() => {
     for (const s of spans)
       s.classList.add("verse-flash-active");
   });

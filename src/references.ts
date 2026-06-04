@@ -849,7 +849,7 @@ export async function resolveVerseLink(
     // for the next frame after openFile resolves) has already committed.
     // After that frame, our cancel-then-scroll sequence is guaranteed
     // to be the last writer and wins deterministically.
-    activeWindow.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
       if (activeDocument.body.contains(anchor)) {
         smoothScrollAnchorToCenter(anchor);
       }
@@ -1138,7 +1138,7 @@ function flashVerseSegments(segments: VerseSegment[]): void {
   // Add the active class on the next frame so the browser registers the
   // initial transparent state first — without the rAF, the transition is
   // skipped and the highlight pops in instantly.
-  activeWindow.requestAnimationFrame(() => {
+  window.requestAnimationFrame(() => {
     for (const s of spans) s.classList.add("verse-flash-active");
   });
 

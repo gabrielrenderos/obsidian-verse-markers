@@ -18,9 +18,15 @@ Originally built for study notes over scripture, but it works for any document w
 
 ## Installation
 
-No community-store listing yet. Install manually:
+### From Obsidian (recommended)
 
-1. Download or build `main.js`, `manifest.json`, and `styles.css` (see *Building from source* below).
+1. Open **Settings → Community plugins** and make sure restricted mode is off.
+2. Select **Browse**, search for **Verse Markers**, and select **Install**.
+3. Select **Enable**.
+
+### Manual
+
+1. Download `main.js`, `manifest.json`, and `styles.css` from the latest [GitHub release](https://github.com/gabrielrenderos/obsidian-verse-markers/releases) (or build them — see *Building from source* below).
 2. Copy those three files into your vault at:
    ```
    <vault>/.obsidian/plugins/verse-markers/
