@@ -33,11 +33,12 @@ export class VerseMarkersSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "Verse Markers Settings" });
+    new Setting(containerEl).setName("Reference syntax").setHeading();
 
     // Syntax reference block (visible to users in the settings pane)
-    const syntaxEl = containerEl.createEl("div", { cls: "setting-item-description" });
-    syntaxEl.style.marginBottom = "1em";
+    const syntaxEl = containerEl.createEl("div", {
+      cls: "setting-item-description verse-markers-syntax-ref",
+    });
     syntaxEl.createEl("strong", { text: "Reference syntax:" });
     syntaxEl.createEl("br");
     syntaxEl.appendText(

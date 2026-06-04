@@ -40,8 +40,17 @@
  * shadow, the corner "open" link, and scroll behavior exactly the same
  * way it styles Obsidian's native page-preview popover.
  *
- * The .verse-hover-preview class is kept purely as an identifier so plugin
- * code can find these elements; it carries no visual rules. */
+ * The .verse-hover-preview class is mainly an identifier so plugin code can
+ * find these elements; its only visual rule is the absolute positioning the
+ * popover needs (applied here rather than inline for theme-ability). */
+.verse-hover-preview {
+  position: absolute;
+}
+
+/* Settings: spacing under the reference-syntax description block. */
+.verse-markers-syntax-ref {
+  margin-bottom: 1em;
+}
 
 /* Post-navigation flash highlight.
  *

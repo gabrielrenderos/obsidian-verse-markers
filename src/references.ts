@@ -185,8 +185,8 @@ function buildRangeCore(
     if (trimStart || trimEnd) {
       const parts = getVerseParts(content, n);
       if (!parts) continue;
-      const sliceStart = trimStart ? partToIndex(startPart as string) : 0;
-      const sliceEnd = trimEnd ? partToIndex(endPart as string) + 1 : parts.length;
+      const sliceStart = trimStart && startPart !== null ? partToIndex(startPart) : 0;
+      const sliceEnd = trimEnd && endPart !== null ? partToIndex(endPart) + 1 : parts.length;
       if (sliceStart < 0 || sliceStart >= parts.length) continue;
       if (sliceEnd <= sliceStart) continue;
       const sliced = parts.slice(sliceStart, sliceEnd).filter((p) => p.length > 0);
@@ -511,9 +511,8 @@ export function attachVerseHoverPreview(
     // Position is anchored to the link element's bounding rect (NOT the
     // cursor) so it lands in the same place regardless of where the
     // pointer entered, matching Obsidian's native popover behavior.
-    const el = document.createElement("div");
+    const el = activeDocument.createElement("div");
     el.className = "popover hover-popover verse-hover-preview";
-    el.style.position = "absolute";
 
     // Build the node up-front so closures below can reference it by capture.
     const newNode: PopoverNode = {
@@ -539,15 +538,15 @@ export function attachVerseHoverPreview(
       scheduleHide();
     });
 
-    const embed = document.createElement("div");
+    const embed = activeDocument.createElement("div");
     embed.className = "markdown-embed is-loaded";
     el.appendChild(embed);
 
-    const contentEl = document.createElement("div");
+    const contentEl = activeDocument.createElement("div");
     contentEl.className = "markdown-embed-content";
     embed.appendChild(contentEl);
 
-    const previewEl = document.createElement("div");
+    const previewEl = activeDocument.createElement("div");
     previewEl.className = "markdown-preview-view markdown-rendered";
     contentEl.appendChild(previewEl);
 
@@ -555,16 +554,16 @@ export function attachVerseHoverPreview(
     // uses, so themes style the chrome (position, hover background) for
     // free. The icon is the diagonal-arrows glyph that matches Obsidian's
     // current native popover.
-    const openLink = document.createElement("a");
+    const openLink = activeDocument.createElement("a");
     openLink.className = "markdown-embed-link";
     openLink.setAttribute("aria-label", "Open link");
     setIcon(openLink, "lucide-move-diagonal-2");
-    openLink.addEventListener("click", async (clickEv) => {
+    openLink.addEventListener("click", (clickEv) => {
       clickEv.preventDefault();
       clickEv.stopPropagation();
       // Closing from the root collapses the whole chain at once.
       hideRoot(newNode);
-      await resolveVerseLink(plugin.app, file, fragment, allowShorthand);
+      void resolveVerseLink(plugin.app, file, fragment, allowShorthand);
     });
     embed.appendChild(openLink);
 
@@ -572,7 +571,7 @@ export function attachVerseHoverPreview(
     // start. Final placement runs again after render once we know the
     // popover's actual size (so we can flip above / clip to viewport).
     positionPopover(el, anchorEl);
-    document.body.appendChild(el);
+    activeDocument.body.appendChild(el);
 
     // Register parent ↔ child link as soon as the DOM is in place. This is
     // intentionally before the async render: if the parent's hide timer
@@ -586,7 +585,7 @@ export function attachVerseHoverPreview(
 
     const component = new Component();
     component.load();
-    await MarkdownRenderer.renderMarkdown(markdown, previewEl, file.path, component);
+    await MarkdownRenderer.render(plugin.app, markdown, previewEl, file.path, component);
 
     // Re-position now that the rendered content has determined the size.
     positionPopover(el, anchorEl);
@@ -679,12 +678,12 @@ function wirePopoverContent(
     const filePart = href.slice(0, hashIdx);
     const fragment = href.slice(hashIdx + 1);
 
-    const onClick = async (ev: MouseEvent): Promise<void> => {
+    const onClick = (ev: MouseEvent): void => {
       const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, "");
       if (!(file instanceof TFile)) return;
       ev.preventDefault();
       hideRoot(ownerNode);
-      await resolveVerseLink(plugin.app, file, fragment, allowShorthand);
+      void resolveVerseLink(plugin.app, file, fragment, allowShorthand);
     };
     a.addEventListener("click", onClick);
     disposers.push(() => a.removeEventListener("click", onClick));
@@ -775,13 +774,14 @@ export async function resolveVerseLink(
     leaf.view instanceof MarkdownView && leaf.view.file === file;
   const anchorAlreadyMounted =
     sameFileOpen &&
-    (document.getElementById(primaryId) !== null ||
-      document.getElementById(fallbackId) !== null);
+    (activeDocument.getElementById(primaryId) !== null ||
+      activeDocument.getElementById(fallbackId) !== null);
   const needForcedScroll = !anchorAlreadyMounted && targetLine !== null;
 
-  const openState: { eState?: { line: number } } | undefined = needForcedScroll
-    ? { eState: { line: targetLine as number } }
-    : undefined;
+  const openState: { eState?: { line: number } } | undefined =
+    needForcedScroll && targetLine !== null
+      ? { eState: { line: targetLine } }
+      : undefined;
 
   // Suppress Obsidian's native scroll-flash for the duration of this
   // navigation. eState: { line } both scrolls the preview AND triggers
@@ -822,7 +822,7 @@ export async function resolveVerseLink(
   // capping the total wait so we don't hang forever on a missing verse.
   const anchor =
     (await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) ??
-    document.getElementById(fallbackId);
+    activeDocument.getElementById(fallbackId);
   if (anchor) {
     // We deliberately avoid Element.scrollIntoView({block: "center"}). Two
     // problems made it unreliable in our setup:
@@ -849,8 +849,8 @@ export async function resolveVerseLink(
     // for the next frame after openFile resolves) has already committed.
     // After that frame, our cancel-then-scroll sequence is guaranteed
     // to be the last writer and wins deterministically.
-    requestAnimationFrame(() => {
-      if (document.body.contains(anchor)) {
+    activeWindow.requestAnimationFrame(() => {
+      if (activeDocument.body.contains(anchor)) {
         smoothScrollAnchorToCenter(anchor);
       }
     });
@@ -996,7 +996,7 @@ function stripNativeFlashClasses(el: Element): void {
  * early; otherwise the timer disconnects automatically.
  */
 function suppressNativeFlashFor(durationMs: number): () => void {
-  const root = document.body;
+  const root = activeDocument.body;
 
   // Strip anything already flagged before we started — covers the rare
   // case where the previous navigation's flash hasn't decayed yet.
@@ -1052,7 +1052,7 @@ function waitForElementById(
   id: string,
   timeoutMs: number
 ): Promise<HTMLElement | null> {
-  const existing = document.getElementById(id);
+  const existing = activeDocument.getElementById(id);
   if (existing) return Promise.resolve(existing);
 
   return new Promise((resolve) => {
@@ -1066,13 +1066,13 @@ function waitForElementById(
     };
 
     const observer = new MutationObserver(() => {
-      const el = document.getElementById(id);
+      const el = activeDocument.getElementById(id);
       if (el) finish(el);
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(activeDocument.body, { childList: true, subtree: true });
 
     const timer = window.setTimeout(() => {
-      finish(document.getElementById(id));
+      finish(activeDocument.getElementById(id));
     }, timeoutMs);
   });
 }
@@ -1138,7 +1138,7 @@ function flashVerseSegments(segments: VerseSegment[]): void {
   // Add the active class on the next frame so the browser registers the
   // initial transparent state first — without the rAF, the transition is
   // skipped and the highlight pops in instantly.
-  requestAnimationFrame(() => {
+  activeWindow.requestAnimationFrame(() => {
     for (const s of spans) s.classList.add("verse-flash-active");
   });
 
@@ -1168,7 +1168,7 @@ function wrapRangeWithSpans(range: Range, className: string): HTMLSpanElement[] 
     ancestor.nodeType === Node.TEXT_NODE ? ancestor.parentNode : ancestor;
   if (!walkRoot) return spans;
 
-  const walker = document.createTreeWalker(walkRoot, NodeFilter.SHOW_TEXT);
+  const walker = activeDocument.createTreeWalker(walkRoot, NodeFilter.SHOW_TEXT);
   const candidates: Text[] = [];
   let cur: Node | null;
   while ((cur = walker.nextNode())) {
@@ -1190,7 +1190,7 @@ function wrapRangeWithSpans(range: Range, className: string): HTMLSpanElement[] 
   for (const node of candidates) {
     const parent = node.parentNode;
     if (!parent) continue;
-    const span = document.createElement("span");
+    const span = activeDocument.createElement("span");
     span.className = className;
     parent.insertBefore(span, node);
     span.appendChild(node);
@@ -1240,7 +1240,7 @@ function anchorInSegment(
  * document order — `querySelectorAll` already provides that.
  */
 function collectInSegmentsAnchors(segments: VerseSegment[]): HTMLElement[] {
-  const all = document.querySelectorAll<HTMLElement>('[id^="verse-"]');
+  const all = activeDocument.querySelectorAll<HTMLElement>('[id^="verse-"]');
   const inRange: HTMLElement[] = [];
   for (let i = 0; i < all.length; i++) {
     const el = all[i];
@@ -1297,7 +1297,7 @@ function findFlashStopBetween(
   const selectors = includeHeadings
     ? [...FLASH_STOP_FOOTNOTE_SELECTORS, ...FLASH_STOP_HEADING_SELECTORS]
     : FLASH_STOP_FOOTNOTE_SELECTORS;
-  const candidates = document.querySelectorAll<HTMLElement>(selectors.join(","));
+  const candidates = activeDocument.querySelectorAll<HTMLElement>(selectors.join(","));
   for (let i = 0; i < candidates.length; i++) {
     const el = candidates[i];
     if (!(a.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) {
@@ -1345,7 +1345,7 @@ function buildVerseFlashRanges(segments: VerseSegment[]): FlashRange[] {
   // next stopping point for each in-range one (the next anchor may itself
   // be out of range — e.g. the verse right after the end of a segment).
   const allValidAnchors: HTMLElement[] = [];
-  const all = document.querySelectorAll<HTMLElement>('[id^="verse-"]');
+  const all = activeDocument.querySelectorAll<HTMLElement>('[id^="verse-"]');
   for (let i = 0; i < all.length; i++) {
     if (/^verse-\d+[a-z]*$/.test(all[i].id)) allValidAnchors.push(all[i]);
   }
@@ -1366,7 +1366,7 @@ function buildVerseFlashRanges(segments: VerseSegment[]): FlashRange[] {
     // highlight. Footnotes are always a stop.
     const includeHeadings = !nextInSelection;
 
-    const range = document.createRange();
+    const range = activeDocument.createRange();
     try {
       range.setStartBefore(anchor);
       const stop = findFlashStopBetween(anchor, next ?? null, includeHeadings);
@@ -1376,7 +1376,7 @@ function buildVerseFlashRanges(segments: VerseSegment[]): FlashRange[] {
         range.setEndBefore(next);
       } else {
         // No next anchor and no stop — extend through end of body.
-        const last = document.body.lastChild;
+        const last = activeDocument.body.lastChild;
         if (!last) continue;
         range.setEndAfter(last);
       }

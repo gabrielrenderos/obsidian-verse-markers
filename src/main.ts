@@ -80,13 +80,14 @@ export default class VerseMarkersPlugin extends Plugin {
     });
   }
 
-  async onunload(): Promise<void> {
+  onunload(): void {
     for (const dispose of this.hoverDisposers) dispose();
     this.hoverDisposers = [];
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = (await this.loadData()) as Partial<VerseMarkersSettings> | null;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data ?? {});
   }
 
   async saveSettings(): Promise<void> {
@@ -114,12 +115,12 @@ export default class VerseMarkersPlugin extends Plugin {
       // stopPropagation prevents Obsidian's document-level link handler
       // from also opening the link with its default scroll-to-heading
       // logic — on mobile that race could overwrite our scroll target.
-      const onClick = async (ev: MouseEvent): Promise<void> => {
+      const onClick = (ev: MouseEvent): void => {
         const file = this.app.metadataCache.getFirstLinkpathDest(filePart, "");
         if (!(file instanceof TFile)) return;
         ev.preventDefault();
         ev.stopPropagation();
-        await resolveVerseLink(this.app, file, fragment, allowShorthand);
+        void resolveVerseLink(this.app, file, fragment, allowShorthand);
       };
       a.addEventListener("click", onClick);
       this.hoverDisposers.push(() => a.removeEventListener("click", onClick));

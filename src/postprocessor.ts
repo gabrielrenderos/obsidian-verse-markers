@@ -8,7 +8,9 @@
 
 import { MarkdownPostProcessorContext } from "obsidian";
 import {
+  execVerseMarker,
   getVerseRegex,
+  hasVerseMarker,
   parseMarkerToken,
   continuationPartAnchor,
   VERSE_FRAGMENT_TEST_STRICT,
@@ -54,7 +56,7 @@ function processTextNode(textNode: Text): boolean {
   const matches: RegExpExecArray[] = [];
   let match: RegExpExecArray | null;
 
-  while ((match = re.exec(text)) !== null) {
+  while ((match = execVerseMarker(re, text)) !== null) {
     matches.push(match);
   }
 
@@ -63,7 +65,7 @@ function processTextNode(textNode: Text): boolean {
   const parent = textNode.parentNode;
   if (!parent) return false;
 
-  const fragment = document.createDocumentFragment();
+  const fragment = activeDocument.createDocumentFragment();
   let lastIndex = 0;
 
   for (const m of matches) {
@@ -72,14 +74,14 @@ function processTextNode(textNode: Text): boolean {
     const end = start + token.length;
 
     if (start > lastIndex) {
-      fragment.appendChild(document.createTextNode(text.slice(lastIndex, start)));
+      fragment.appendChild(activeDocument.createTextNode(text.slice(lastIndex, start)));
     }
 
     // Strip the brackets: render only the label (number + any authored part
     // letters), carrying the matching verse id.
     const { number, part } = parseMarkerToken(token);
     const label = `${number}${part ?? ""}`;
-    const markerEl = document.createElement("span");
+    const markerEl = activeDocument.createElement("span");
     markerEl.className = "verse-marker";
     markerEl.id = `verse-${label}`;
     markerEl.textContent = label;
@@ -89,7 +91,7 @@ function processTextNode(textNode: Text): boolean {
   }
 
   if (lastIndex < text.length) {
-    fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+    fragment.appendChild(activeDocument.createTextNode(text.slice(lastIndex)));
   }
 
   parent.replaceChild(fragment, textNode);
@@ -102,7 +104,7 @@ function processTextNode(textNode: Text): boolean {
  */
 function collectTextNodes(el: HTMLElement): Text[] {
   const result: Text[] = [];
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const walker = activeDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT);
   let node: Node | null;
   while ((node = walker.nextNode()) !== null) {
     const textNode = node as Text;
@@ -163,7 +165,7 @@ function partAnchorForBlock(
   // "verse-N" id — no extra injection needed for part a.
   const sourceLines = info.text.split("\n");
   const blockText = sourceLines.slice(info.lineStart, info.lineEnd + 1).join("\n");
-  if (getVerseRegex().test(blockText)) return null;
+  if (hasVerseMarker(blockText)) return null;
 
   return continuationPartAnchor(info.text, info.lineStart);
 }
@@ -175,7 +177,7 @@ function partAnchorForBlock(
  */
 function injectPartAnchor(el: HTMLElement, id: string): void {
   if (el.querySelector(`#${CSS.escape(id)}`)) return;
-  const anchor = document.createElement("span");
+  const anchor = activeDocument.createElement("span");
   anchor.id = id;
   anchor.className = "verse-part-anchor";
   anchor.setAttribute("aria-hidden", "true");

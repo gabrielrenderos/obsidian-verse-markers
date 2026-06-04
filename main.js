@@ -31,9 +31,26 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian4 = require("obsidian");
 
 // src/detection.ts
-var VERSE_MARKER_REGEX = /(?:^|(?<=[>\s]))\[\d+[a-z]*\](?=\s|$)/gm;
+var VERSE_MARKER_REGEX = /\[\d+[a-z]*\](?=\s|$)/gm;
 function getVerseRegex() {
   return new RegExp(VERSE_MARKER_REGEX.source, VERSE_MARKER_REGEX.flags);
+}
+function atVerseBoundary(text, index) {
+  if (index <= 0)
+    return true;
+  const prev = text.charAt(index - 1);
+  return prev === ">" || /\s/.test(prev);
+}
+function execVerseMarker(re, text) {
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (atVerseBoundary(text, m.index))
+      return m;
+  }
+  return null;
+}
+function hasVerseMarker(text) {
+  return execVerseMarker(getVerseRegex(), text) !== null;
 }
 function parseMarkerToken(token) {
   const m = /^\[(\d+)([a-z]*)\]$/.exec(token);
@@ -48,7 +65,7 @@ function scanMarkers(text) {
   const re = getVerseRegex();
   const hits = [];
   let m;
-  while ((m = re.exec(text)) !== null) {
+  while ((m = execVerseMarker(re, text)) !== null) {
     const { number, part } = parseMarkerToken(m[0]);
     hits.push({
       number,
@@ -100,7 +117,7 @@ function findVerseSpan(text, verseNumber) {
   let spanStart = -1;
   let spanEnd = text.length;
   let match;
-  while ((match = re.exec(text)) !== null) {
+  while ((match = execVerseMarker(re, text)) !== null) {
     const num = parseMarkerToken(match[0]).number;
     const afterMarker = match.index + match[0].length;
     if (spanStart === -1 && num === verseNumber) {
@@ -163,7 +180,7 @@ function getVerseContent(text, verseNumber, part = null) {
 function verseBlockquotePrefix(text, verseNumber) {
   const re = getVerseRegex();
   let match;
-  while ((match = re.exec(text)) !== null) {
+  while ((match = execVerseMarker(re, text)) !== null) {
     if (parseMarkerToken(match[0]).number !== verseNumber)
       continue;
     const lineStart = text.lastIndexOf("\n", match.index - 1) + 1;
@@ -268,7 +285,7 @@ ${appended.join("\n\n")}`;
 function findVerseLine(text, verseNumber) {
   const re = getVerseRegex();
   let match;
-  while ((match = re.exec(text)) !== null) {
+  while ((match = execVerseMarker(re, text)) !== null) {
     const num = parseMarkerToken(match[0]).number;
     if (num === verseNumber) {
       let line = 0;
@@ -290,7 +307,7 @@ function continuationPartAnchor(text, blockStartLine) {
       headingCount++;
       continue;
     }
-    const marker = getVerseRegex().exec(lines[i]);
+    const marker = execVerseMarker(getVerseRegex(), lines[i]);
     if (marker) {
       verseNumber = parseMarkerToken(marker[0]).number;
       break;
@@ -404,7 +421,7 @@ function processTextNode(textNode) {
   const re = getVerseRegex();
   const matches = [];
   let match;
-  while ((match = re.exec(text)) !== null) {
+  while ((match = execVerseMarker(re, text)) !== null) {
     matches.push(match);
   }
   if (matches.length === 0)
@@ -412,18 +429,18 @@ function processTextNode(textNode) {
   const parent = textNode.parentNode;
   if (!parent)
     return false;
-  const fragment = document.createDocumentFragment();
+  const fragment = activeDocument.createDocumentFragment();
   let lastIndex = 0;
   for (const m of matches) {
     const start = m.index;
     const token = m[0];
     const end = start + token.length;
     if (start > lastIndex) {
-      fragment.appendChild(document.createTextNode(text.slice(lastIndex, start)));
+      fragment.appendChild(activeDocument.createTextNode(text.slice(lastIndex, start)));
     }
     const { number, part } = parseMarkerToken(token);
     const label = `${number}${part != null ? part : ""}`;
-    const markerEl = document.createElement("span");
+    const markerEl = activeDocument.createElement("span");
     markerEl.className = "verse-marker";
     markerEl.id = `verse-${label}`;
     markerEl.textContent = label;
@@ -431,14 +448,14 @@ function processTextNode(textNode) {
     lastIndex = end;
   }
   if (lastIndex < text.length) {
-    fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+    fragment.appendChild(activeDocument.createTextNode(text.slice(lastIndex)));
   }
   parent.replaceChild(fragment, textNode);
   return true;
 }
 function collectTextNodes(el) {
   const result = [];
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const walker = activeDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT);
   let node;
   while ((node = walker.nextNode()) !== null) {
     const textNode = node;
@@ -472,14 +489,14 @@ function partAnchorForBlock(el, ctx) {
     return null;
   const sourceLines = info.text.split("\n");
   const blockText = sourceLines.slice(info.lineStart, info.lineEnd + 1).join("\n");
-  if (getVerseRegex().test(blockText))
+  if (hasVerseMarker(blockText))
     return null;
   return continuationPartAnchor(info.text, info.lineStart);
 }
 function injectPartAnchor(el, id) {
   if (el.querySelector(`#${CSS.escape(id)}`))
     return;
-  const anchor = document.createElement("span");
+  const anchor = activeDocument.createElement("span");
   anchor.id = id;
   anchor.className = "verse-part-anchor";
   anchor.setAttribute("aria-hidden", "true");
@@ -508,7 +525,7 @@ function nearestVerseAtOffset(text, cursorOffset) {
   let match;
   let best = null;
   let bestDist = Infinity;
-  while ((match = re.exec(text)) !== null) {
+  while ((match = execVerseMarker(re, text)) !== null) {
     const start = match.index;
     const end = start + match[0].length;
     const dist = Math.min(Math.abs(cursorOffset - start), Math.abs(cursorOffset - end));
@@ -524,7 +541,7 @@ function verseRangeInSelection(text, selFrom, selTo) {
   const re = getVerseRegex();
   const found = [];
   let match;
-  while ((match = re.exec(slice)) !== null) {
+  while ((match = execVerseMarker(re, slice)) !== null) {
     found.push(markerLabel(match[0]));
   }
   if (found.length < 2)
@@ -552,7 +569,7 @@ function registerCommands(plugin) {
       }
       const fileName = (_b = (_a = plugin.app.workspace.getActiveFile()) == null ? void 0 : _a.basename) != null ? _b : "";
       const ref = `[[${fileName}#verse-${verseNum}]]`;
-      navigator.clipboard.writeText(ref).then(() => {
+      void navigator.clipboard.writeText(ref).then(() => {
         new import_obsidian.Notice(`Copied: ${ref}`);
       });
     }
@@ -585,7 +602,7 @@ function registerCommands(plugin) {
       }
       const fileName = (_b = (_a = plugin.app.workspace.getActiveFile()) == null ? void 0 : _a.basename) != null ? _b : "";
       const ref = `[[${fileName}#verse-${range.first}:${range.last}]]`;
-      navigator.clipboard.writeText(ref).then(() => {
+      void navigator.clipboard.writeText(ref).then(() => {
         new import_obsidian.Notice(`Copied: ${ref}`);
       });
     }
@@ -644,8 +661,8 @@ function buildRangeCore(content, start, end, maxVerses, startPart, endPart) {
       const parts = getVerseParts(content, n);
       if (!parts)
         continue;
-      const sliceStart = trimStart ? partToIndex2(startPart) : 0;
-      const sliceEnd = trimEnd ? partToIndex2(endPart) + 1 : parts.length;
+      const sliceStart = trimStart && startPart !== null ? partToIndex2(startPart) : 0;
+      const sliceEnd = trimEnd && endPart !== null ? partToIndex2(endPart) + 1 : parts.length;
       if (sliceStart < 0 || sliceStart >= parts.length)
         continue;
       if (sliceEnd <= sliceStart)
@@ -823,9 +840,8 @@ function attachVerseHoverPreview(plugin, anchorEl, linkText) {
       return;
     if (!markdown)
       return;
-    const el = document.createElement("div");
+    const el = activeDocument.createElement("div");
     el.className = "popover hover-popover verse-hover-preview";
-    el.style.position = "absolute";
     const newNode = {
       el,
       parent: parentNode,
@@ -844,28 +860,28 @@ function attachVerseHoverPreview(plugin, anchorEl, linkText) {
       newNode.hovered = false;
       scheduleHide();
     });
-    const embed = document.createElement("div");
+    const embed = activeDocument.createElement("div");
     embed.className = "markdown-embed is-loaded";
     el.appendChild(embed);
-    const contentEl = document.createElement("div");
+    const contentEl = activeDocument.createElement("div");
     contentEl.className = "markdown-embed-content";
     embed.appendChild(contentEl);
-    const previewEl = document.createElement("div");
+    const previewEl = activeDocument.createElement("div");
     previewEl.className = "markdown-preview-view markdown-rendered";
     contentEl.appendChild(previewEl);
-    const openLink = document.createElement("a");
+    const openLink = activeDocument.createElement("a");
     openLink.className = "markdown-embed-link";
     openLink.setAttribute("aria-label", "Open link");
     (0, import_obsidian2.setIcon)(openLink, "lucide-move-diagonal-2");
-    openLink.addEventListener("click", async (clickEv) => {
+    openLink.addEventListener("click", (clickEv) => {
       clickEv.preventDefault();
       clickEv.stopPropagation();
       hideRoot(newNode);
-      await resolveVerseLink(plugin.app, file, fragment, allowShorthand);
+      void resolveVerseLink(plugin.app, file, fragment, allowShorthand);
     });
     embed.appendChild(openLink);
     positionPopover(el, anchorEl);
-    document.body.appendChild(el);
+    activeDocument.body.appendChild(el);
     if (parentNode) {
       parentNode.children.add(newNode);
       cancelHideUpChain(parentNode);
@@ -873,7 +889,7 @@ function attachVerseHoverPreview(plugin, anchorEl, linkText) {
     popoverNodes.set(el, newNode);
     const component = new import_obsidian2.Component();
     component.load();
-    await import_obsidian2.MarkdownRenderer.renderMarkdown(markdown, previewEl, file.path, component);
+    await import_obsidian2.MarkdownRenderer.render(plugin.app, markdown, previewEl, file.path, component);
     positionPopover(el, anchorEl);
     if (myToken !== showToken) {
       component.unload();
@@ -931,13 +947,13 @@ function wirePopoverContent(plugin, contentEl, ownerNode) {
       continue;
     const filePart = href.slice(0, hashIdx);
     const fragment = href.slice(hashIdx + 1);
-    const onClick = async (ev) => {
+    const onClick = (ev) => {
       const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, "");
       if (!(file instanceof import_obsidian2.TFile))
         return;
       ev.preventDefault();
       hideRoot(ownerNode);
-      await resolveVerseLink(plugin.app, file, fragment, allowShorthand);
+      void resolveVerseLink(plugin.app, file, fragment, allowShorthand);
     };
     a.addEventListener("click", onClick);
     disposers.push(() => a.removeEventListener("click", onClick));
@@ -969,9 +985,9 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
   const firstPart = firstFragmentPart(content, startVerse);
   const fallbackId = !startPart && firstPart ? `verse-${startVerse}${firstPart}` : `verse-${startVerse}`;
   const sameFileOpen = leaf.view instanceof import_obsidian2.MarkdownView && leaf.view.file === file;
-  const anchorAlreadyMounted = sameFileOpen && (document.getElementById(primaryId) !== null || document.getElementById(fallbackId) !== null);
+  const anchorAlreadyMounted = sameFileOpen && (activeDocument.getElementById(primaryId) !== null || activeDocument.getElementById(fallbackId) !== null);
   const needForcedScroll = !anchorAlreadyMounted && targetLine !== null;
-  const openState = needForcedScroll ? { eState: { line: targetLine } } : void 0;
+  const openState = needForcedScroll && targetLine !== null ? { eState: { line: targetLine } } : void 0;
   if (needForcedScroll) {
     suppressNativeFlashFor(NATIVE_FLASH_SUPPRESS_MS);
   }
@@ -980,10 +996,10 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
     const scrollableView = leaf.view;
     (_a = scrollableView.applyScroll) == null ? void 0 : _a.call(scrollableView, targetLine);
   }
-  const anchor = (_b = await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) != null ? _b : document.getElementById(fallbackId);
+  const anchor = (_b = await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) != null ? _b : activeDocument.getElementById(fallbackId);
   if (anchor) {
-    requestAnimationFrame(() => {
-      if (document.body.contains(anchor)) {
+    activeWindow.requestAnimationFrame(() => {
+      if (activeDocument.body.contains(anchor)) {
         smoothScrollAnchorToCenter(anchor);
       }
     });
@@ -1034,7 +1050,7 @@ function stripNativeFlashClasses(el) {
   }
 }
 function suppressNativeFlashFor(durationMs) {
-  const root = document.body;
+  const root = activeDocument.body;
   for (const cls of NATIVE_FLASH_CLASSES) {
     root.querySelectorAll(`.${cls}`).forEach(stripNativeFlashClasses);
   }
@@ -1073,7 +1089,7 @@ function suppressNativeFlashFor(durationMs) {
   return dispose;
 }
 function waitForElementById(id, timeoutMs) {
-  const existing = document.getElementById(id);
+  const existing = activeDocument.getElementById(id);
   if (existing)
     return Promise.resolve(existing);
   return new Promise((resolve) => {
@@ -1087,13 +1103,13 @@ function waitForElementById(id, timeoutMs) {
       resolve(el);
     };
     const observer = new MutationObserver(() => {
-      const el = document.getElementById(id);
+      const el = activeDocument.getElementById(id);
       if (el)
         finish(el);
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(activeDocument.body, { childList: true, subtree: true });
     const timer = window.setTimeout(() => {
-      finish(document.getElementById(id));
+      finish(activeDocument.getElementById(id));
     }, timeoutMs);
   });
 }
@@ -1126,7 +1142,7 @@ function flashVerseSegments(segments) {
   if (spans.length === 0)
     return;
   activeFlashSpans = spans;
-  requestAnimationFrame(() => {
+  activeWindow.requestAnimationFrame(() => {
     for (const s of spans)
       s.classList.add("verse-flash-active");
   });
@@ -1146,7 +1162,7 @@ function wrapRangeWithSpans(range, className) {
   const walkRoot = ancestor.nodeType === Node.TEXT_NODE ? ancestor.parentNode : ancestor;
   if (!walkRoot)
     return spans;
-  const walker = document.createTreeWalker(walkRoot, NodeFilter.SHOW_TEXT);
+  const walker = activeDocument.createTreeWalker(walkRoot, NodeFilter.SHOW_TEXT);
   const candidates = [];
   let cur;
   while (cur = walker.nextNode()) {
@@ -1165,7 +1181,7 @@ function wrapRangeWithSpans(range, className) {
     const parent = node.parentNode;
     if (!parent)
       continue;
-    const span = document.createElement("span");
+    const span = activeDocument.createElement("span");
     span.className = className;
     parent.insertBefore(span, node);
     span.appendChild(node);
@@ -1204,7 +1220,7 @@ function anchorInSegment(n, part, seg) {
 }
 function collectInSegmentsAnchors(segments) {
   var _a;
-  const all = document.querySelectorAll('[id^="verse-"]');
+  const all = activeDocument.querySelectorAll('[id^="verse-"]');
   const inRange = [];
   for (let i = 0; i < all.length; i++) {
     const el = all[i];
@@ -1226,7 +1242,7 @@ var FLASH_STOP_FOOTNOTE_SELECTORS = [
 var FLASH_STOP_HEADING_SELECTORS = ["h1", "h2", "h3", "h4", "h5", "h6"];
 function findFlashStopBetween(a, b, includeHeadings) {
   const selectors = includeHeadings ? [...FLASH_STOP_FOOTNOTE_SELECTORS, ...FLASH_STOP_HEADING_SELECTORS] : FLASH_STOP_FOOTNOTE_SELECTORS;
-  const candidates = document.querySelectorAll(selectors.join(","));
+  const candidates = activeDocument.querySelectorAll(selectors.join(","));
   for (let i = 0; i < candidates.length; i++) {
     const el = candidates[i];
     if (!(a.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) {
@@ -1244,7 +1260,7 @@ function buildVerseFlashRanges(segments) {
   if (inRange.length === 0)
     return [];
   const allValidAnchors = [];
-  const all = document.querySelectorAll('[id^="verse-"]');
+  const all = activeDocument.querySelectorAll('[id^="verse-"]');
   for (let i = 0; i < all.length; i++) {
     if (/^verse-\d+[a-z]*$/.test(all[i].id))
       allValidAnchors.push(all[i]);
@@ -1258,7 +1274,7 @@ function buildVerseFlashRanges(segments) {
     const nextInSelection = next !== void 0 && inRangeSet.has(next);
     const prevInSelection = prev !== void 0 && inRangeSet.has(prev);
     const includeHeadings = !nextInSelection;
-    const range = document.createRange();
+    const range = activeDocument.createRange();
     try {
       range.setStartBefore(anchor);
       const stop = findFlashStopBetween(anchor, next != null ? next : null, includeHeadings);
@@ -1267,7 +1283,7 @@ function buildVerseFlashRanges(segments) {
       } else if (next) {
         range.setEndBefore(next);
       } else {
-        const last = document.body.lastChild;
+        const last = activeDocument.body.lastChild;
         if (!last)
           continue;
         range.setEndAfter(last);
@@ -1299,9 +1315,10 @@ var VerseMarkersSettingTab = class extends import_obsidian3.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Verse Markers Settings" });
-    const syntaxEl = containerEl.createEl("div", { cls: "setting-item-description" });
-    syntaxEl.style.marginBottom = "1em";
+    new import_obsidian3.Setting(containerEl).setName("Reference syntax").setHeading();
+    const syntaxEl = containerEl.createEl("div", {
+      cls: "setting-item-description verse-markers-syntax-ref"
+    });
     syntaxEl.createEl("strong", { text: "Reference syntax:" });
     syntaxEl.createEl("br");
     syntaxEl.appendText(
@@ -1369,13 +1386,14 @@ var VerseMarkersPlugin = class extends import_obsidian4.Plugin {
       await resolveVerseLink(this.app, file, fragment);
     });
   }
-  async onunload() {
+  onunload() {
     for (const dispose of this.hoverDisposers)
       dispose();
     this.hoverDisposers = [];
   }
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data != null ? data : {});
   }
   async saveSettings() {
     await this.saveData(this.settings);
@@ -1396,13 +1414,13 @@ var VerseMarkersPlugin = class extends import_obsidian4.Plugin {
         continue;
       const filePart = href.slice(0, hashIdx);
       const fragment = href.slice(hashIdx + 1);
-      const onClick = async (ev) => {
+      const onClick = (ev) => {
         const file = this.app.metadataCache.getFirstLinkpathDest(filePart, "");
         if (!(file instanceof import_obsidian4.TFile))
           return;
         ev.preventDefault();
         ev.stopPropagation();
-        await resolveVerseLink(this.app, file, fragment, allowShorthand);
+        void resolveVerseLink(this.app, file, fragment, allowShorthand);
       };
       a.addEventListener("click", onClick);
       this.hoverDisposers.push(() => a.removeEventListener("click", onClick));

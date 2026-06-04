@@ -20,9 +20,11 @@
  * label (some Bibles split a single canonical verse into [5a]…[5b]…), which
  * shares the same `verse-Na` addressing as heading/footnote-derived parts.
  *
- * Uses a lookbehind so captures only [N] itself (not the preceding char).
+ * The left boundary (start-of-line, ">", or whitespace) is enforced in code
+ * via execVerseMarker/atVerseBoundary instead of a regex lookbehind, because
+ * lookbehind is unsupported on iOS/WebKit before 16.4.
  */
-export const VERSE_MARKER_REGEX = /(?:^|(?<=[>\s]))\[\d+[a-z]*\](?=\s|$)/gm;
+export const VERSE_MARKER_REGEX = /\[\d+[a-z]*\](?=\s|$)/gm;
 
 /**
  * Returns a fresh (lastIndex-reset) copy of the canonical regex.
@@ -31,6 +33,38 @@ export const VERSE_MARKER_REGEX = /(?:^|(?<=[>\s]))\[\d+[a-z]*\](?=\s|$)/gm;
  */
 export function getVerseRegex(): RegExp {
   return new RegExp(VERSE_MARKER_REGEX.source, VERSE_MARKER_REGEX.flags);
+}
+
+/**
+ * True when a marker found at `index` sits at a valid left boundary: the
+ * start of the text, or immediately after ">" or any whitespace. This is the
+ * lookbehind-free equivalent of the old `(?:^|(?<=[>\s]))` prefix.
+ */
+export function atVerseBoundary(text: string, index: number): boolean {
+  if (index <= 0) return true;
+  const prev = text.charAt(index - 1);
+  return prev === ">" || /\s/.test(prev);
+}
+
+/**
+ * exec() wrapper that skips matches failing the left-boundary test, so the
+ * canonical regex can stay lookbehind-free. `re` must be a fresh global regex
+ * from getVerseRegex(); its lastIndex advances as usual between calls.
+ */
+export function execVerseMarker(
+  re: RegExp,
+  text: string
+): RegExpExecArray | null {
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (atVerseBoundary(text, m.index)) return m;
+  }
+  return null;
+}
+
+/** True when `text` contains at least one boundary-valid verse marker. */
+export function hasVerseMarker(text: string): boolean {
+  return execVerseMarker(getVerseRegex(), text) !== null;
 }
 
 /**
@@ -70,7 +104,7 @@ function scanMarkers(text: string): MarkerHit[] {
   const re = getVerseRegex();
   const hits: MarkerHit[] = [];
   let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
+  while ((m = execVerseMarker(re, text)) !== null) {
     const { number, part } = parseMarkerToken(m[0]);
     hits.push({
       number,
@@ -178,7 +212,7 @@ function findVerseSpan(
   let spanEnd = text.length;
   let match: RegExpExecArray | null;
 
-  while ((match = re.exec(text)) !== null) {
+  while ((match = execVerseMarker(re, text)) !== null) {
     const num = parseMarkerToken(match[0]).number;
     const afterMarker = match.index + match[0].length;
     if (spanStart === -1 && num === verseNumber) {
@@ -309,7 +343,7 @@ export function verseBlockquotePrefix(
 ): string {
   const re = getVerseRegex();
   let match: RegExpExecArray | null;
-  while ((match = re.exec(text)) !== null) {
+  while ((match = execVerseMarker(re, text)) !== null) {
     if (parseMarkerToken(match[0]).number !== verseNumber) continue;
     const lineStart = text.lastIndexOf("\n", match.index - 1) + 1;
     const prefix = /^(\s*(?:>\s?)+)/.exec(text.slice(lineStart, match.index));
@@ -506,7 +540,7 @@ export function findVerseLine(
 ): number | null {
   const re = getVerseRegex();
   let match: RegExpExecArray | null;
-  while ((match = re.exec(text)) !== null) {
+  while ((match = execVerseMarker(re, text)) !== null) {
     const num = parseMarkerToken(match[0]).number;
     if (num === verseNumber) {
       let line = 0;
@@ -556,7 +590,7 @@ export function continuationPartAnchor(
       headingCount++;
       continue;
     }
-    const marker = getVerseRegex().exec(lines[i]);
+    const marker = execVerseMarker(getVerseRegex(), lines[i]);
     if (marker) {
       verseNumber = parseMarkerToken(marker[0]).number;
       break;
@@ -635,7 +669,7 @@ export function getAllVerseNumbers(text: string): number[] {
   const re = getVerseRegex();
   const numbers: number[] = [];
   let match: RegExpExecArray | null;
-  while ((match = re.exec(text)) !== null) {
+  while ((match = execVerseMarker(re, text)) !== null) {
     numbers.push(parseMarkerToken(match[0]).number);
   }
   return numbers;

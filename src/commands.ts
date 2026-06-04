@@ -7,7 +7,7 @@
  */
 
 import { Editor, Notice } from "obsidian";
-import { getVerseRegex, parseMarkerToken } from "./detection";
+import { execVerseMarker, getVerseRegex, parseMarkerToken } from "./detection";
 import type VerseMarkersPlugin from "./main";
 
 /** Renders a marker token's value as a reference label ("5" or "5a"). */
@@ -27,7 +27,7 @@ function nearestVerseAtOffset(text: string, cursorOffset: number): string | null
   let best: string | null = null;
   let bestDist = Infinity;
 
-  while ((match = re.exec(text)) !== null) {
+  while ((match = execVerseMarker(re, text)) !== null) {
     const start = match.index;
     const end = start + match[0].length;
     const dist = Math.min(Math.abs(cursorOffset - start), Math.abs(cursorOffset - end));
@@ -54,7 +54,7 @@ function verseRangeInSelection(
   const found: string[] = [];
   let match: RegExpExecArray | null;
 
-  while ((match = re.exec(slice)) !== null) {
+  while ((match = execVerseMarker(re, slice)) !== null) {
     found.push(markerLabel(match[0]));
   }
 
@@ -92,7 +92,7 @@ export function registerCommands(plugin: VerseMarkersPlugin): void {
 
       const fileName = plugin.app.workspace.getActiveFile()?.basename ?? "";
       const ref = `[[${fileName}#verse-${verseNum}]]`;
-      navigator.clipboard.writeText(ref).then(() => {
+      void navigator.clipboard.writeText(ref).then(() => {
         new Notice(`Copied: ${ref}`);
       });
     },
@@ -133,7 +133,7 @@ export function registerCommands(plugin: VerseMarkersPlugin): void {
 
       const fileName = plugin.app.workspace.getActiveFile()?.basename ?? "";
       const ref = `[[${fileName}#verse-${range.first}:${range.last}]]`;
-      navigator.clipboard.writeText(ref).then(() => {
+      void navigator.clipboard.writeText(ref).then(() => {
         new Notice(`Copied: ${ref}`);
       });
     },
