@@ -3,8 +3,8 @@
   "name": "Verse Markers",
   "version": "1.0.0",
   "minAppVersion": "1.4.0",
-  "description": "Inline verse numbering and referencing system for Obsidian notes.",
+  "description": "Inline verse numbering with cross-note verse references, hover previews, and flash highlighting.",
   "author": "Gabriel Renderos",
-  "authorUrl": "",
+  "authorUrl": "https://github.com/gabrielrenderos",
   "isDesktopOnly": false
 }
