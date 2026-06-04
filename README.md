@@ -8,6 +8,7 @@ Originally built for study notes over scripture, but it works for any document w
 
 - **Inline verse markers** — Any token like `[3]` (or an authored part like `[3a]`) at the start of a line, after a blockquote `>`, or after whitespace is treated as a verse. Reading view renders it as just the label, colored with the theme's link accent. Live preview is left untouched so it keeps Obsidian's native look.
 - **Wiki-link references** — `[[Gospel of John#verse-3]]` jumps to verse 3 in the target file. Ranges (`verse-3:7`) and parts (`verse-3a`, `verse-3b`, …) are supported, whether a part comes from a heading/footnote split or is written into the marker itself.
+- **Disjoint (skip-verse) references** — `[[File#verse-4:6/8:10]]` cites verses 4–6 **and** 8–10 while excluding 7, for lectionary-style passages that skip verses. The popover shows only the cited verses and the temporary highlight covers each piece, leaving the gaps untouched.
 - **Authored verse parts** — markers may carry a part suffix, e.g. `[5a]`, `[5b]`, `[12bc]`. A single canonical verse can be split into scattered, separately-marked pieces (even interleaved with other verses) and still be referenced as a whole or by individual part.
 - **Hover previews for ranges** — hover a `verse-N:M` link to see the quoted verse text inline without opening the file.
 - **Two "Copy reference" commands** — grab a wiki-link for the verse near your cursor, or for a selection spanning multiple verses.
@@ -142,6 +143,21 @@ Range part semantics:
 - If the **start** has a part suffix (`3b:7`), the first verse shown begins at that part (earlier parts of that verse are hidden).
 - If the **end** has a part suffix (`3:7c`), the last verse shown ends at that part (later parts of that verse are hidden).
 - Clicking a range link scrolls to the start endpoint's part anchor, falling back to the verse anchor if the part anchor isn't present.
+
+### Disjoint references (skip verses)
+
+Lectionary readings often skip verses inside a passage — the Spanish notation `Juan 3,4-6.8-10` means "John chapter 3, verses 4–6 **and** 8–10", omitting verse 7. Join segments with `/` ("and also") to express this:
+
+| Syntax                     | Meaning                                            |
+|----------------------------|----------------------------------------------------|
+| `[[File#verse-4:6/8:10]]`  | Verses 4–6 **and** 8–10 (7 excluded)               |
+| `[[File#verse-3/5/7]]`     | Verses 3, 5, and 7 only                            |
+| `[[File#verse-4:6/8/10:11]]`| Verses 4–6, then 8, then 10–11                    |
+
+- Each segment is itself a single verse or a range (parts allowed), and the `verse-` prefix applies to the whole reference.
+- The popover shows **only** the cited verses, in order, with the skipped verses omitted; footnotes for the shown verses are still included.
+- The temporary highlight covers every cited verse and stops at each gap, so excluded verses are never highlighted. Each contiguous block gets its own rounded highlight.
+- Clicking navigates to the first segment's start verse.
 
 ### Shorthand (opt-in)
 

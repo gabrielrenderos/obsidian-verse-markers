@@ -657,6 +657,14 @@ export function getAllVerseNumbers(text: string): number[] {
  *     [[File#3a]] [[File#3b]]   split parts
  *     [[File#3:7]]              range
  *
+ * Disjoint multi-segment (always recognized):
+ *     [[File#verse-4:6/8:10]]   verses 4..6 AND 8..10 (7 excluded)
+ *     [[File#verse-3/5/7]]      verses 3, 5, and 7 only
+ *   Segments are joined with "/" ("and also"); each segment is itself a
+ *   single verse or a range, with the optional shorthand prefix applying to
+ *   the whole reference. This mirrors lectionary citations such as the
+ *   Spanish "Juan 3,4-6.8-10" which skip verses inside a passage.
+ *
  * COLLISION NOTE on the shorthand form: if the target note has a heading
  * literally named "3", "3a", or "3:7", this plugin will hijack the link.
  * That is why shorthand is off by default. "Copy verse reference" commands
@@ -722,14 +730,81 @@ export function parseVerseSingle(
 }
 
 /**
- * Strict: explicit "verse-N", "verse-Na", "verse-N:M", and any range variant
- * with part suffixes on either endpoint ("verse-Na:M", "verse-N:Mb",
- * "verse-Na:Mb").
+ * One contiguous piece of a (possibly disjoint) verse reference. A single
+ * verse is represented as a degenerate range where start === end and the
+ * endpoint parts are equal.
  */
-export const VERSE_FRAGMENT_TEST_STRICT = /^verse-\d+[a-z]*(?::\d+[a-z]*)?$/;
+export interface VerseSegment {
+  start: number;
+  startPart: string | null;
+  end: number;
+  endPart: string | null;
+}
+
+/** A single segment's grammar: "N", "Na", "N:M", "Na:Mb", etc. */
+const SEGMENT_SOURCE = String.raw`\d+[a-z]*(?::\d+[a-z]*)?`;
+
+/**
+ * Parses a verse reference into one or more ordered segments. Handles every
+ * supported form uniformly:
+ *   verse-3        → [{3,null,3,null}]
+ *   verse-3a       → [{3,"a",3,"a"}]
+ *   verse-3:7      → [{3,null,7,null}]
+ *   verse-4:6/8:10 → [{4,null,6,null}, {8,null,10,null}]
+ *   verse-3/5/7    → [{3,null,3,null}, {5,null,5,null}, {7,null,7,null}]
+ *
+ * Segments are separated by "/". The "verse-" prefix (required unless
+ * `allowShorthand`) applies to the whole reference, not each segment. Returns
+ * null if the fragment is not a valid verse reference.
+ */
+export function parseVerseSegments(
+  fragment: string,
+  allowShorthand: boolean = false
+): VerseSegment[] | null {
+  let core: string;
+  if (fragment.startsWith("verse-")) {
+    core = fragment.slice("verse-".length);
+  } else if (allowShorthand) {
+    core = fragment;
+  } else {
+    return null;
+  }
+  if (core.length === 0) return null;
+
+  const segRe = new RegExp(`^(\\d+)([a-z]*)(?::(\\d+)([a-z]*))?$`);
+  const segments: VerseSegment[] = [];
+  for (const piece of core.split("/")) {
+    const m = segRe.exec(piece);
+    if (!m) return null;
+    const start = parseInt(m[1], 10);
+    const startPart = m[2] === "" ? null : m[2];
+    if (m[3] !== undefined) {
+      segments.push({
+        start,
+        startPart,
+        end: parseInt(m[3], 10),
+        endPart: m[4] === "" ? null : m[4],
+      });
+    } else {
+      segments.push({ start, startPart, end: start, endPart: startPart });
+    }
+  }
+  return segments;
+}
+
+/**
+ * Strict: explicit "verse-N", "verse-Na", "verse-N:M", any range variant with
+ * part suffixes, and disjoint multi-segment forms joined by "/"
+ * ("verse-4:6/8:10").
+ */
+export const VERSE_FRAGMENT_TEST_STRICT = new RegExp(
+  `^verse-${SEGMENT_SOURCE}(?:/${SEGMENT_SOURCE})*$`
+);
 
 /** Loose: explicit OR shorthand (opt-in). */
-export const VERSE_FRAGMENT_TEST_LOOSE = /^(?:verse-)?\d+[a-z]*(?::\d+[a-z]*)?$/;
+export const VERSE_FRAGMENT_TEST_LOOSE = new RegExp(
+  `^(?:verse-)?${SEGMENT_SOURCE}(?:/${SEGMENT_SOURCE})*$`
+);
 
 /** Strict range test: explicit forms only, with optional part suffixes. */
 export const VERSE_RANGE_FRAGMENT_TEST_STRICT = /^verse-\d+[a-z]*:\d+[a-z]*$/;

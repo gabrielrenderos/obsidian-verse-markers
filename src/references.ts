@@ -31,10 +31,10 @@ import {
   getVerseFragments,
   getVerseParts,
   getVerseRangeRawText,
-  parseVerseRange,
-  parseVerseSingle,
+  parseVerseSegments,
   partHasAnchor,
   verseBlockquotePrefix,
+  type VerseSegment,
 } from "./detection";
 import { collectVerseAnchors } from "./postprocessor";
 import type VerseMarkersPlugin from "./main";
@@ -140,26 +140,24 @@ function applyBlockquotePrefix(text: string, prefix: string): string {
 }
 
 /**
- * Builds the markdown source for a verse range preview.
+ * Builds the preview markdown for a verse range, WITHOUT appending footnote
+ * definitions (the caller does that once so multi-segment references don't
+ * duplicate the footnote section). Returns the number of canonical verses the
+ * core actually covers (for the shared verse budget) and null markdown if
+ * nothing was found.
  *
- * `startPart` and `endPart` (if given) trim the endpoints to a specific
- * heading-split sub-part:
- *   startPart "b" → the start verse begins at part b (earlier parts hidden).
- *   endPart   "c" → the end verse ends at part c   (later parts hidden).
- *
- * Returns null if the file cannot be read or no verses are found.
+ * `startPart`/`endPart` (if given) trim the endpoints to a specific
+ * heading-split sub-part. `maxVerses` caps how many verses this core renders.
  */
-export async function buildRangePreviewMarkdown(
-  app: App,
-  file: TFile,
+function buildRangeCore(
+  content: string,
   start: number,
   end: number,
   maxVerses: number,
-  startPart: string | null = null,
-  endPart: string | null = null
-): Promise<string | null> {
-  const content = await app.vault.cachedRead(file);
-  const limit = Math.min(end, start + maxVerses - 1);
+  startPart: string | null,
+  endPart: string | null
+): { markdown: string; versesUsed: number } | null {
+  const limit = Math.min(end, start + Math.max(maxVerses, 1) - 1);
 
   // Fast path: no part trimming. Return the raw source span so the popover
   // mirrors the document layout (inline verse markers, paragraphs, headings,
@@ -168,11 +166,7 @@ export async function buildRangePreviewMarkdown(
   if (startPart === null && endPart === null) {
     const raw = getVerseRangeRawText(content, start, limit);
     if (!raw || raw.length === 0) return null;
-    // Footnote definitions usually live at the bottom of the file, well
-    // outside this slice. Append the ones referenced inside the slice so
-    // MarkdownRenderer can resolve them — without this, refs render as
-    // bare unstyled numbers and there's no footnote section in the popover.
-    return appendMissingFootnoteDefinitions(raw, content);
+    return { markdown: raw, versesUsed: limit - start + 1 };
   }
 
   // Trimmed path: one or both endpoints reference a specific part, so we
@@ -206,22 +200,66 @@ export async function buildRangePreviewMarkdown(
   }
 
   if (blocks.length === 0) return null;
-  const joined = blocks.join("\n\n");
-  return appendMissingFootnoteDefinitions(joined, content);
+  return { markdown: blocks.join("\n\n"), versesUsed: limit - start + 1 };
 }
 
 /**
- * Builds the markdown source for a single-verse preview.
+ * Builds the preview markdown for a single verse, WITHOUT footnote append.
  *
  * `part` (optional) selects a specific sub-part — an authored [Na] fragment if
- * one exists, else a heading/footnote-split segment. Returns null if the verse
- * or part is missing.
- *
- * For a whole-verse reference (part null) to a verse the editor split into
- * scattered fragments ([5a]…[5b]…), each fragment is rendered as its own
- * block — labeled with its own marker and kept on a separate line — rather
- * than joined, with the heading and any verses physically between them
- * omitted. A plain `[N]` verse stays a single block exactly as before.
+ * one exists, else a heading/footnote-split segment. For a whole-verse
+ * reference (part null) to a verse the editor split into scattered fragments
+ * ([5a]…[5b]…), each fragment is rendered as its own block (labeled with its
+ * own marker, kept on a separate line), omitting the heading and any verses
+ * physically between them. A plain `[N]` verse stays a single block.
+ */
+function buildSingleCore(
+  content: string,
+  verse: number,
+  part: string | null
+): string | null {
+  const prefix = verseBlockquotePrefix(content, verse);
+
+  if (part !== null) {
+    const verseText = getVerseContent(content, verse, part);
+    if (verseText === null || verseText.length === 0) return null;
+    const line = `${verseMarkerLabel(`${verse}${part}`)} ${verseText}`;
+    return applyBlockquotePrefix(line, prefix);
+  }
+
+  const blocks = getVerseFragments(content, verse)
+    .filter((f) => f.content.length > 0)
+    .map((f) => {
+      const label = f.part ? `${verse}${f.part}` : `${verse}`;
+      const line = `${verseMarkerLabel(label)} ${f.content}`;
+      return applyBlockquotePrefix(line, prefix);
+    });
+  if (blocks.length === 0) return null;
+  return blocks.join("\n\n");
+}
+
+/**
+ * Builds the markdown source for a verse range preview. Public wrapper that
+ * reads the file and appends any missing footnote definitions once.
+ */
+export async function buildRangePreviewMarkdown(
+  app: App,
+  file: TFile,
+  start: number,
+  end: number,
+  maxVerses: number,
+  startPart: string | null = null,
+  endPart: string | null = null
+): Promise<string | null> {
+  const content = await app.vault.cachedRead(file);
+  const core = buildRangeCore(content, start, end, maxVerses, startPart, endPart);
+  if (!core) return null;
+  return appendMissingFootnoteDefinitions(core.markdown, content);
+}
+
+/**
+ * Builds the markdown source for a single-verse preview. Public wrapper that
+ * reads the file and appends any missing footnote definitions once.
  */
 export async function buildSinglePreviewMarkdown(
   app: App,
@@ -230,24 +268,55 @@ export async function buildSinglePreviewMarkdown(
   part: string | null
 ): Promise<string | null> {
   const content = await app.vault.cachedRead(file);
-  const prefix = verseBlockquotePrefix(content, verse);
+  const core = buildSingleCore(content, verse, part);
+  if (!core) return null;
+  return appendMissingFootnoteDefinitions(core, content);
+}
 
-  if (part !== null) {
-    const verseText = getVerseContent(content, verse, part);
-    if (verseText === null || verseText.length === 0) return null;
-    const line = `${verseMarkerLabel(`${verse}${part}`)} ${verseText}`;
-    const body = applyBlockquotePrefix(line, prefix);
-    return appendMissingFootnoteDefinitions(body, content);
+/**
+ * Builds the preview markdown for a (possibly disjoint) multi-segment verse
+ * reference, e.g. `verse-4:6/8:10`. Each segment is rendered in order with the
+ * verses it excludes (7, here) omitted; segments are separated by a blank
+ * line. A single shared `maxVerses` budget is spent across all segments, and
+ * footnote definitions are appended once over the whole result.
+ *
+ * Returns null if the file can't be read or no segment yields content.
+ */
+export async function buildSegmentsPreviewMarkdown(
+  app: App,
+  file: TFile,
+  segments: VerseSegment[],
+  maxVerses: number
+): Promise<string | null> {
+  const content = await app.vault.cachedRead(file);
+  const blocks: string[] = [];
+  let remaining = maxVerses;
+
+  for (const seg of segments) {
+    if (remaining <= 0) break;
+    const isSingle = seg.start === seg.end && seg.startPart === seg.endPart;
+    if (isSingle) {
+      const core = buildSingleCore(content, seg.start, seg.startPart);
+      if (core) {
+        blocks.push(core);
+        remaining -= 1;
+      }
+    } else {
+      const core = buildRangeCore(
+        content,
+        seg.start,
+        seg.end,
+        remaining,
+        seg.startPart,
+        seg.endPart
+      );
+      if (core) {
+        blocks.push(core.markdown);
+        remaining -= core.versesUsed;
+      }
+    }
   }
 
-  const fragments = getVerseFragments(content, verse);
-  const blocks = fragments
-    .filter((f) => f.content.length > 0)
-    .map((f) => {
-      const label = f.part ? `${verse}${f.part}` : `${verse}`;
-      const line = `${verseMarkerLabel(label)} ${f.content}`;
-      return applyBlockquotePrefix(line, prefix);
-    });
   if (blocks.length === 0) return null;
   return appendMissingFootnoteDefinitions(blocks.join("\n\n"), content);
 }
@@ -409,29 +478,17 @@ export function attachVerseHoverPreview(
 
     const myToken = ++showToken;
 
-    // Try range first (more specific), then single.
+    // One unified path handles single verses, ranges, and disjoint
+    // multi-segment references (verse-4:6/8:10) alike.
     let markdown: string | null = null;
-    const range = parseVerseRange(fragment, allowShorthand);
-    if (range) {
-      markdown = await buildRangePreviewMarkdown(
+    const segments = parseVerseSegments(fragment, allowShorthand);
+    if (segments) {
+      markdown = await buildSegmentsPreviewMarkdown(
         plugin.app,
         file,
-        range.start,
-        range.end,
-        plugin.settings.hoverPreviewMaxVerses,
-        range.startPart,
-        range.endPart
+        segments,
+        plugin.settings.hoverPreviewMaxVerses
       );
-    } else {
-      const single = parseVerseSingle(fragment, allowShorthand);
-      if (single) {
-        markdown = await buildSinglePreviewMarkdown(
-          plugin.app,
-          file,
-          single.verse,
-          single.part
-        );
-      }
     }
 
     // User moved off before we finished building content.
@@ -645,6 +702,10 @@ export const attachRangeHoverPreview = attachVerseHoverPreview;
  * `allowShorthand` must mirror the plugin's `enableShorthandSyntax` setting
  * so we only accept shorthand fragments when the user has opted in.
  *
+ * For a disjoint multi-segment reference ("verse-4:6/8:10") navigation jumps
+ * to the first segment's start; the flash then highlights every segment,
+ * leaving the excluded verses (7, here) untouched.
+ *
  * Scroll target resolution:
  *   - "verse-N"   → id="verse-N"
  *   - "verse-Na"  → id="verse-Na" if present, else id="verse-N"
@@ -656,29 +717,11 @@ export async function resolveVerseLink(
   fragment: string,
   allowShorthand: boolean = false
 ): Promise<boolean> {
-  const single = parseVerseSingle(fragment, allowShorthand);
-  const range = parseVerseRange(fragment, allowShorthand);
+  const segments = parseVerseSegments(fragment, allowShorthand);
+  if (!segments || segments.length === 0) return false;
 
-  let startVerse: number | null = null;
-  let startPart: string | null = null;
-  let endVerse: number | null = null;
-  let endPart: string | null = null;
-
-  if (single !== null) {
-    startVerse = single.verse;
-    startPart = single.part;
-    endVerse = single.verse;
-    endPart = single.part;
-  } else if (range !== null) {
-    // For a range, jump to the start endpoint. If it has a part suffix
-    // ("verse-4b:25"), scroll to that part anchor with fallback to verse-N.
-    startVerse = range.start;
-    startPart = range.startPart;
-    endVerse = range.end;
-    endPart = range.endPart;
-  }
-
-  if (startVerse === null || endVerse === null) return false;
+  let startVerse = segments[0].start;
+  let startPart = segments[0].startPart;
 
   const leaf = app.workspace.getMostRecentLeaf();
   if (!leaf) return false;
@@ -691,8 +734,16 @@ export async function resolveVerseLink(
   // heading-boundary parts and part "a" do). When the referenced part isn't
   // anchored, drop the part suffix so navigation scrolls to and flashes the
   // complete verse instead of nothing. Heading-split parts are unaffected.
-  if (!partHasAnchor(content, startVerse, startPart)) startPart = null;
-  if (!partHasAnchor(content, endVerse, endPart)) endPart = null;
+  // Normalize every segment's endpoints the same way for the flash below.
+  const flashSegments: VerseSegment[] = segments.map((seg) => ({
+    start: seg.start,
+    startPart: partHasAnchor(content, seg.start, seg.startPart)
+      ? seg.startPart
+      : null,
+    end: seg.end,
+    endPart: partHasAnchor(content, seg.end, seg.endPart) ? seg.endPart : null,
+  }));
+  startPart = flashSegments[0].startPart;
 
   const targetLine = findVerseLine(content, startVerse);
   const primaryId = startPart
@@ -801,12 +852,7 @@ export async function resolveVerseLink(
       }
     });
   }
-  flashVerseRange(
-    startVerse as number,
-    startPart,
-    endVerse as number,
-    endPart
-  );
+  flashVerseSegments(flashSegments);
 
   return true;
 }
@@ -1042,24 +1088,25 @@ let flashTimer: number | null = null;
 
 /**
  * Briefly highlights only the *text* of the verses inside the navigated
- * span — not their containing blocks. We wrap the text nodes that fall
+ * reference — not their containing blocks. We wrap the text nodes that fall
  * inside each in-range verse's DOM Range with `<span class="verse-flash">`
  * elements, then toggle `.verse-flash-active` to drive a CSS background
  * transition. The rounded-corner / padded look is therefore real CSS box
  * decoration (impossible with the CSS Custom Highlight API, which only
  * accepts color/background-color/text-decoration on `::highlight()`).
  *
+ * Works for a single verse, a range, or a disjoint multi-segment reference:
+ * each verse that belongs to the reference is highlighted up to (but not
+ * including) the next anchor, so verses excluded by a gap (e.g. 7 in
+ * 4:6/8:10) are never highlighted. Rounded end-caps are applied per
+ * contiguous run, so each highlighted block reads as its own pill.
+ *
  * Spans are unwrapped after the fade-out completes so the DOM ends up
  * exactly as it started.
  */
-function flashVerseRange(
-  startVerse: number,
-  startPart: string | null,
-  endVerse: number,
-  endPart: string | null
-): void {
-  const ranges = buildVerseTextRanges(startVerse, startPart, endVerse, endPart);
-  if (ranges.length === 0) return;
+function flashVerseSegments(segments: VerseSegment[]): void {
+  const flashRanges = buildVerseFlashRanges(segments);
+  if (flashRanges.length === 0) return;
 
   // Tear down any in-flight previous flash before starting this one.
   if (flashTimer !== null) {
@@ -1069,26 +1116,19 @@ function flashVerseRange(
   unwrapFlashSpans();
 
   const spans: HTMLSpanElement[] = [];
-  const spansByRange: HTMLSpanElement[][] = [];
-  for (const range of ranges) {
-    const rangeSpans = wrapRangeWithSpans(range, "verse-flash");
-    spansByRange.push(rangeSpans);
-    for (const span of rangeSpans) {
-      spans.push(span);
+  for (const fr of flashRanges) {
+    const rangeSpans = wrapRangeWithSpans(fr.range, "verse-flash");
+    if (rangeSpans.length > 0) {
+      // Cap a run's outer edges only (the first span of a run-start and the
+      // last span of a run-end) so interior seams stay square and seamless.
+      if (fr.capStart) rangeSpans[0].classList.add("verse-flash-start");
+      if (fr.capEnd) {
+        rangeSpans[rangeSpans.length - 1].classList.add("verse-flash-end");
+      }
     }
+    for (const span of rangeSpans) spans.push(span);
   }
   if (spans.length === 0) return;
-
-  // Determine edge caps from verse-range boundaries (first/last verse in
-  // selection), then apply them only to the true outer spans so interior
-  // spans (including verse number/body seams) stay square and seamless.
-  const nonEmptyRangeSpans = spansByRange.filter((group) => group.length > 0);
-  const firstRangeSpans = nonEmptyRangeSpans[0];
-  const lastRangeSpans = nonEmptyRangeSpans[nonEmptyRangeSpans.length - 1];
-  if (firstRangeSpans?.length) firstRangeSpans[0].classList.add("verse-flash-start");
-  if (lastRangeSpans?.length) {
-    lastRangeSpans[lastRangeSpans.length - 1].classList.add("verse-flash-end");
-  }
 
   activeFlashSpans = spans;
 
@@ -1171,18 +1211,32 @@ function unwrapFlashSpans(): void {
 }
 
 /**
- * Returns the list of verse-anchor elements that fall within the given
- * span, applying part-trim rules at both endpoints. Returned in document
- * order — `querySelectorAll` already provides that.
+ * Reports whether a verse anchor numbered `n` with part `part` (null for a
+ * plain marker) falls inside `seg`, honoring part-trims at the endpoints.
  */
-function collectInRangeAnchors(
-  startVerse: number,
-  startPart: string | null,
-  endVerse: number,
-  endPart: string | null
-): HTMLElement[] {
-  const startCode = startPart !== null ? startPart.charCodeAt(0) : 0;
-  const endCode = endPart !== null ? endPart.charCodeAt(0) : 0;
+function anchorInSegment(
+  n: number,
+  part: string | null,
+  seg: VerseSegment
+): boolean {
+  if (n < seg.start || n > seg.end) return false;
+  if (n === seg.start && seg.startPart !== null) {
+    if (part === null) return false;
+    if (part.charCodeAt(0) < seg.startPart.charCodeAt(0)) return false;
+  }
+  if (n === seg.end && seg.endPart !== null && part !== null) {
+    if (part.charCodeAt(0) > seg.endPart.charCodeAt(0)) return false;
+  }
+  return true;
+}
+
+/**
+ * Returns the verse-anchor elements that fall within ANY of the reference's
+ * segments, applying part-trim rules at each segment's endpoints. Verses that
+ * lie in a gap between segments (e.g. 7 in 4:6/8:10) are excluded. Returned in
+ * document order — `querySelectorAll` already provides that.
+ */
+function collectInSegmentsAnchors(segments: VerseSegment[]): HTMLElement[] {
   const all = document.querySelectorAll<HTMLElement>('[id^="verse-"]');
   const inRange: HTMLElement[] = [];
   for (let i = 0; i < all.length; i++) {
@@ -1191,16 +1245,7 @@ function collectInRangeAnchors(
     if (!m) continue;
     const n = parseInt(m[1], 10);
     const part = m[2] ?? null;
-
-    if (n < startVerse || n > endVerse) continue;
-    if (n === startVerse && startPart !== null) {
-      if (part === null) continue;
-      if (part.charCodeAt(0) < startCode) continue;
-    }
-    if (n === endVerse && endPart !== null && part !== null) {
-      if (part.charCodeAt(0) > endCode) continue;
-    }
-    inRange.push(el);
+    if (segments.some((seg) => anchorInSegment(n, part, seg))) inRange.push(el);
   }
   return inRange;
 }
@@ -1264,30 +1309,38 @@ function findFlashStopBetween(
 }
 
 /**
- * Builds DOM Ranges that cover the text of each in-range verse: from the
- * verse's anchor element up to (but not including) the next verse anchor
- * in the document. Final in-range verse extends to end-of-document.
+/** A flash range plus whether it begins/ends a contiguous highlighted run. */
+interface FlashRange {
+  range: Range;
+  capStart: boolean;
+  capEnd: boolean;
+}
+
+/**
+ * Builds DOM Ranges that cover the text of each verse belonging to the
+ * reference's segments: from the verse's anchor element up to (but not
+ * including) the next verse anchor in the document. The final in-range verse
+ * extends to end-of-document.
  *
- * Heading clamp: when the verse AFTER the current anchor is NOT itself in
- * the selection (i.e. this is a trailing edge of the highlighted span), the
- * range stops before any heading that sits between the two anchors. Without
- * this, a section heading that precedes the next verse would be swept into
- * the highlight even though the user's selection ends within the previous
- * section. For interior verses, headings are kept inside the range so
- * heading-split verses (parts b, c, …) still highlight fully.
+ * Disjoint support: membership is tested against ALL segments, so verses in a
+ * gap (7 in 4:6/8:10) are skipped — and because each in-range verse stops at
+ * the very next anchor (which, before a gap, is the excluded verse), the
+ * excluded text is never highlighted. Each range is tagged capStart/capEnd
+ * when it begins/ends a contiguous run, so the caller rounds only the true
+ * outer edges of each highlighted block.
+ *
+ * Heading clamp: when the verse AFTER the current anchor is NOT itself in the
+ * selection (a trailing edge of a run), the range stops before any heading
+ * between the two anchors. For interior verses, headings stay inside the range
+ * so heading-split verses (parts b, c, …) still highlight fully.
  */
-function buildVerseTextRanges(
-  startVerse: number,
-  startPart: string | null,
-  endVerse: number,
-  endPart: string | null
-): Range[] {
-  const inRange = collectInRangeAnchors(startVerse, startPart, endVerse, endPart);
+function buildVerseFlashRanges(segments: VerseSegment[]): FlashRange[] {
+  const inRange = collectInSegmentsAnchors(segments);
   if (inRange.length === 0) return [];
 
   // Need every verse-* anchor in document order to find the immediate
   // next stopping point for each in-range one (the next anchor may itself
-  // be out of range — e.g. the verse right after the end of the span).
+  // be out of range — e.g. the verse right after the end of a segment).
   const allValidAnchors: HTMLElement[] = [];
   const all = document.querySelectorAll<HTMLElement>('[id^="verse-"]');
   for (let i = 0; i < all.length; i++) {
@@ -1296,15 +1349,17 @@ function buildVerseTextRanges(
 
   const inRangeSet = new Set<HTMLElement>(inRange);
 
-  const ranges: Range[] = [];
+  const ranges: FlashRange[] = [];
   for (const anchor of inRange) {
     const idx = allValidAnchors.indexOf(anchor);
     const next = idx >= 0 ? allValidAnchors[idx + 1] : undefined;
+    const prev = idx > 0 ? allValidAnchors[idx - 1] : undefined;
     const nextInSelection = next !== undefined && inRangeSet.has(next);
+    const prevInSelection = prev !== undefined && inRangeSet.has(prev);
 
     // Headings act as a stop only when the selection does NOT continue
-    // into the next anchor (i.e. this is the trailing edge). When it
-    // does continue (heading-split parts), headings stay inside the
+    // into the next anchor (i.e. this is the trailing edge of a run). When
+    // it does continue (heading-split parts), headings stay inside the
     // highlight. Footnotes are always a stop.
     const includeHeadings = !nextInSelection;
 
@@ -1322,7 +1377,11 @@ function buildVerseTextRanges(
         if (!last) continue;
         range.setEndAfter(last);
       }
-      ranges.push(range);
+      ranges.push({
+        range,
+        capStart: !prevInSelection,
+        capEnd: !nextInSelection,
+      });
     } catch {
       // setStart/setEnd can throw on detached nodes; just skip.
       continue;

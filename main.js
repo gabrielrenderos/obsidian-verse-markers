@@ -331,32 +331,45 @@ function firstFragmentPart(text, verseNumber) {
   const first = scanMarkers(text).find((h) => h.number === verseNumber);
   return first ? first.part : null;
 }
-function parseVerseRange(fragment, allowShorthand = false) {
-  var _a, _b;
-  const pattern = allowShorthand ? /^(?:verse-)?(\d+)([a-z]+)?:(\d+)([a-z]+)?$/ : /^verse-(\d+)([a-z]+)?:(\d+)([a-z]+)?$/;
-  const m = pattern.exec(fragment);
-  if (!m)
+var SEGMENT_SOURCE = String.raw`\d+[a-z]*(?::\d+[a-z]*)?`;
+function parseVerseSegments(fragment, allowShorthand = false) {
+  let core;
+  if (fragment.startsWith("verse-")) {
+    core = fragment.slice("verse-".length);
+  } else if (allowShorthand) {
+    core = fragment;
+  } else {
     return null;
-  return {
-    start: parseInt(m[1], 10),
-    startPart: (_a = m[2]) != null ? _a : null,
-    end: parseInt(m[3], 10),
-    endPart: (_b = m[4]) != null ? _b : null
-  };
-}
-function parseVerseSingle(fragment, allowShorthand = false) {
-  var _a;
-  const pattern = allowShorthand ? /^(?:verse-)?(\d+)([a-z]+)?$/ : /^verse-(\d+)([a-z]+)?$/;
-  const m = pattern.exec(fragment);
-  if (!m)
+  }
+  if (core.length === 0)
     return null;
-  return {
-    verse: parseInt(m[1], 10),
-    part: (_a = m[2]) != null ? _a : null
-  };
+  const segRe = new RegExp(`^(\\d+)([a-z]*)(?::(\\d+)([a-z]*))?$`);
+  const segments = [];
+  for (const piece of core.split("/")) {
+    const m = segRe.exec(piece);
+    if (!m)
+      return null;
+    const start = parseInt(m[1], 10);
+    const startPart = m[2] === "" ? null : m[2];
+    if (m[3] !== void 0) {
+      segments.push({
+        start,
+        startPart,
+        end: parseInt(m[3], 10),
+        endPart: m[4] === "" ? null : m[4]
+      });
+    } else {
+      segments.push({ start, startPart, end: start, endPart: startPart });
+    }
+  }
+  return segments;
 }
-var VERSE_FRAGMENT_TEST_STRICT = /^verse-\d+[a-z]*(?::\d+[a-z]*)?$/;
-var VERSE_FRAGMENT_TEST_LOOSE = /^(?:verse-)?\d+[a-z]*(?::\d+[a-z]*)?$/;
+var VERSE_FRAGMENT_TEST_STRICT = new RegExp(
+  `^verse-${SEGMENT_SOURCE}(?:/${SEGMENT_SOURCE})*$`
+);
+var VERSE_FRAGMENT_TEST_LOOSE = new RegExp(
+  `^(?:verse-)?${SEGMENT_SOURCE}(?:/${SEGMENT_SOURCE})*$`
+);
 
 // src/postprocessor.ts
 var SKIP_TAGS = /* @__PURE__ */ new Set([
@@ -613,14 +626,13 @@ function applyBlockquotePrefix(text, prefix) {
     return text;
   return text.split("\n").map((line) => `${prefix}${line}`).join("\n");
 }
-async function buildRangePreviewMarkdown(app, file, start, end, maxVerses, startPart = null, endPart = null) {
-  const content = await app.vault.cachedRead(file);
-  const limit = Math.min(end, start + maxVerses - 1);
+function buildRangeCore(content, start, end, maxVerses, startPart, endPart) {
+  const limit = Math.min(end, start + Math.max(maxVerses, 1) - 1);
   if (startPart === null && endPart === null) {
     const raw = getVerseRangeRawText(content, start, limit);
     if (!raw || raw.length === 0)
       return null;
-    return appendMissingFootnoteDefinitions(raw, content);
+    return { markdown: raw, versesUsed: limit - start + 1 };
   }
   const blocks = [];
   for (let n = start; n <= limit; n++) {
@@ -654,26 +666,55 @@ async function buildRangePreviewMarkdown(app, file, start, end, maxVerses, start
   }
   if (blocks.length === 0)
     return null;
-  const joined = blocks.join("\n\n");
-  return appendMissingFootnoteDefinitions(joined, content);
+  return { markdown: blocks.join("\n\n"), versesUsed: limit - start + 1 };
 }
-async function buildSinglePreviewMarkdown(app, file, verse, part) {
-  const content = await app.vault.cachedRead(file);
+function buildSingleCore(content, verse, part) {
   const prefix = verseBlockquotePrefix(content, verse);
   if (part !== null) {
     const verseText = getVerseContent(content, verse, part);
     if (verseText === null || verseText.length === 0)
       return null;
     const line = `${verseMarkerLabel(`${verse}${part}`)} ${verseText}`;
-    const body = applyBlockquotePrefix(line, prefix);
-    return appendMissingFootnoteDefinitions(body, content);
+    return applyBlockquotePrefix(line, prefix);
   }
-  const fragments = getVerseFragments(content, verse);
-  const blocks = fragments.filter((f) => f.content.length > 0).map((f) => {
+  const blocks = getVerseFragments(content, verse).filter((f) => f.content.length > 0).map((f) => {
     const label = f.part ? `${verse}${f.part}` : `${verse}`;
     const line = `${verseMarkerLabel(label)} ${f.content}`;
     return applyBlockquotePrefix(line, prefix);
   });
+  if (blocks.length === 0)
+    return null;
+  return blocks.join("\n\n");
+}
+async function buildSegmentsPreviewMarkdown(app, file, segments, maxVerses) {
+  const content = await app.vault.cachedRead(file);
+  const blocks = [];
+  let remaining = maxVerses;
+  for (const seg of segments) {
+    if (remaining <= 0)
+      break;
+    const isSingle = seg.start === seg.end && seg.startPart === seg.endPart;
+    if (isSingle) {
+      const core = buildSingleCore(content, seg.start, seg.startPart);
+      if (core) {
+        blocks.push(core);
+        remaining -= 1;
+      }
+    } else {
+      const core = buildRangeCore(
+        content,
+        seg.start,
+        seg.end,
+        remaining,
+        seg.startPart,
+        seg.endPart
+      );
+      if (core) {
+        blocks.push(core.markdown);
+        remaining -= core.versesUsed;
+      }
+    }
+  }
   if (blocks.length === 0)
     return null;
   return appendMissingFootnoteDefinitions(blocks.join("\n\n"), content);
@@ -769,27 +810,14 @@ function attachVerseHoverPreview(plugin, anchorEl, linkText) {
       return;
     const myToken = ++showToken;
     let markdown = null;
-    const range = parseVerseRange(fragment, allowShorthand);
-    if (range) {
-      markdown = await buildRangePreviewMarkdown(
+    const segments = parseVerseSegments(fragment, allowShorthand);
+    if (segments) {
+      markdown = await buildSegmentsPreviewMarkdown(
         plugin.app,
         file,
-        range.start,
-        range.end,
-        plugin.settings.hoverPreviewMaxVerses,
-        range.startPart,
-        range.endPart
+        segments,
+        plugin.settings.hoverPreviewMaxVerses
       );
-    } else {
-      const single = parseVerseSingle(fragment, allowShorthand);
-      if (single) {
-        markdown = await buildSinglePreviewMarkdown(
-          plugin.app,
-          file,
-          single.verse,
-          single.part
-        );
-      }
     }
     if (myToken !== showToken)
       return;
@@ -920,33 +948,22 @@ function wirePopoverContent(plugin, contentEl, ownerNode) {
 }
 async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
   var _a, _b;
-  const single = parseVerseSingle(fragment, allowShorthand);
-  const range = parseVerseRange(fragment, allowShorthand);
-  let startVerse = null;
-  let startPart = null;
-  let endVerse = null;
-  let endPart = null;
-  if (single !== null) {
-    startVerse = single.verse;
-    startPart = single.part;
-    endVerse = single.verse;
-    endPart = single.part;
-  } else if (range !== null) {
-    startVerse = range.start;
-    startPart = range.startPart;
-    endVerse = range.end;
-    endPart = range.endPart;
-  }
-  if (startVerse === null || endVerse === null)
+  const segments = parseVerseSegments(fragment, allowShorthand);
+  if (!segments || segments.length === 0)
     return false;
+  let startVerse = segments[0].start;
+  let startPart = segments[0].startPart;
   const leaf = app.workspace.getMostRecentLeaf();
   if (!leaf)
     return false;
   const content = await app.vault.cachedRead(file);
-  if (!partHasAnchor(content, startVerse, startPart))
-    startPart = null;
-  if (!partHasAnchor(content, endVerse, endPart))
-    endPart = null;
+  const flashSegments = segments.map((seg) => ({
+    start: seg.start,
+    startPart: partHasAnchor(content, seg.start, seg.startPart) ? seg.startPart : null,
+    end: seg.end,
+    endPart: partHasAnchor(content, seg.end, seg.endPart) ? seg.endPart : null
+  }));
+  startPart = flashSegments[0].startPart;
   const targetLine = findVerseLine(content, startVerse);
   const primaryId = startPart ? `verse-${startVerse}${startPart}` : `verse-${startVerse}`;
   const firstPart = firstFragmentPart(content, startVerse);
@@ -971,12 +988,7 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
       }
     });
   }
-  flashVerseRange(
-    startVerse,
-    startPart,
-    endVerse,
-    endPart
-  );
+  flashVerseSegments(flashSegments);
   return true;
 }
 var ANCHOR_WAIT_TIMEOUT_MS = 1500;
@@ -1089,9 +1101,9 @@ var FLASH_FADE_MS = 220;
 var FLASH_HOLD_MS = 2e3;
 var activeFlashSpans = [];
 var flashTimer = null;
-function flashVerseRange(startVerse, startPart, endVerse, endPart) {
-  const ranges = buildVerseTextRanges(startVerse, startPart, endVerse, endPart);
-  if (ranges.length === 0)
+function flashVerseSegments(segments) {
+  const flashRanges = buildVerseFlashRanges(segments);
+  if (flashRanges.length === 0)
     return;
   if (flashTimer !== null) {
     window.clearTimeout(flashTimer);
@@ -1099,24 +1111,20 @@ function flashVerseRange(startVerse, startPart, endVerse, endPart) {
   }
   unwrapFlashSpans();
   const spans = [];
-  const spansByRange = [];
-  for (const range of ranges) {
-    const rangeSpans = wrapRangeWithSpans(range, "verse-flash");
-    spansByRange.push(rangeSpans);
-    for (const span of rangeSpans) {
-      spans.push(span);
+  for (const fr of flashRanges) {
+    const rangeSpans = wrapRangeWithSpans(fr.range, "verse-flash");
+    if (rangeSpans.length > 0) {
+      if (fr.capStart)
+        rangeSpans[0].classList.add("verse-flash-start");
+      if (fr.capEnd) {
+        rangeSpans[rangeSpans.length - 1].classList.add("verse-flash-end");
+      }
     }
+    for (const span of rangeSpans)
+      spans.push(span);
   }
   if (spans.length === 0)
     return;
-  const nonEmptyRangeSpans = spansByRange.filter((group) => group.length > 0);
-  const firstRangeSpans = nonEmptyRangeSpans[0];
-  const lastRangeSpans = nonEmptyRangeSpans[nonEmptyRangeSpans.length - 1];
-  if (firstRangeSpans == null ? void 0 : firstRangeSpans.length)
-    firstRangeSpans[0].classList.add("verse-flash-start");
-  if (lastRangeSpans == null ? void 0 : lastRangeSpans.length) {
-    lastRangeSpans[lastRangeSpans.length - 1].classList.add("verse-flash-end");
-  }
   activeFlashSpans = spans;
   requestAnimationFrame(() => {
     for (const s of spans)
@@ -1179,10 +1187,23 @@ function unwrapFlashSpans() {
   }
   activeFlashSpans = [];
 }
-function collectInRangeAnchors(startVerse, startPart, endVerse, endPart) {
+function anchorInSegment(n, part, seg) {
+  if (n < seg.start || n > seg.end)
+    return false;
+  if (n === seg.start && seg.startPart !== null) {
+    if (part === null)
+      return false;
+    if (part.charCodeAt(0) < seg.startPart.charCodeAt(0))
+      return false;
+  }
+  if (n === seg.end && seg.endPart !== null && part !== null) {
+    if (part.charCodeAt(0) > seg.endPart.charCodeAt(0))
+      return false;
+  }
+  return true;
+}
+function collectInSegmentsAnchors(segments) {
   var _a;
-  const startCode = startPart !== null ? startPart.charCodeAt(0) : 0;
-  const endCode = endPart !== null ? endPart.charCodeAt(0) : 0;
   const all = document.querySelectorAll('[id^="verse-"]');
   const inRange = [];
   for (let i = 0; i < all.length; i++) {
@@ -1192,19 +1213,8 @@ function collectInRangeAnchors(startVerse, startPart, endVerse, endPart) {
       continue;
     const n = parseInt(m[1], 10);
     const part = (_a = m[2]) != null ? _a : null;
-    if (n < startVerse || n > endVerse)
-      continue;
-    if (n === startVerse && startPart !== null) {
-      if (part === null)
-        continue;
-      if (part.charCodeAt(0) < startCode)
-        continue;
-    }
-    if (n === endVerse && endPart !== null && part !== null) {
-      if (part.charCodeAt(0) > endCode)
-        continue;
-    }
-    inRange.push(el);
+    if (segments.some((seg) => anchorInSegment(n, part, seg)))
+      inRange.push(el);
   }
   return inRange;
 }
@@ -1229,8 +1239,8 @@ function findFlashStopBetween(a, b, includeHeadings) {
   }
   return null;
 }
-function buildVerseTextRanges(startVerse, startPart, endVerse, endPart) {
-  const inRange = collectInRangeAnchors(startVerse, startPart, endVerse, endPart);
+function buildVerseFlashRanges(segments) {
+  const inRange = collectInSegmentsAnchors(segments);
   if (inRange.length === 0)
     return [];
   const allValidAnchors = [];
@@ -1244,7 +1254,9 @@ function buildVerseTextRanges(startVerse, startPart, endVerse, endPart) {
   for (const anchor of inRange) {
     const idx = allValidAnchors.indexOf(anchor);
     const next = idx >= 0 ? allValidAnchors[idx + 1] : void 0;
+    const prev = idx > 0 ? allValidAnchors[idx - 1] : void 0;
     const nextInSelection = next !== void 0 && inRangeSet.has(next);
+    const prevInSelection = prev !== void 0 && inRangeSet.has(prev);
     const includeHeadings = !nextInSelection;
     const range = document.createRange();
     try {
@@ -1260,7 +1272,11 @@ function buildVerseTextRanges(startVerse, startPart, endVerse, endPart) {
           continue;
         range.setEndAfter(last);
       }
-      ranges.push(range);
+      ranges.push({
+        range,
+        capStart: !prevInSelection,
+        capEnd: !nextInSelection
+      });
     } catch (e) {
       continue;
     }
