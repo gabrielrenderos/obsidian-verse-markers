@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Gabriel Renderos
+
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type VerseMarkersPlugin from "./main";
 

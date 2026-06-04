@@ -277,4 +277,14 @@ manifest.json       Obsidian plugin manifest.
 
 ## License
 
-MIT
+Copyright (C) 2025 Gabriel Renderos.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the **GNU General Public License v3.0 or later** (GPL-3.0-or-later)
+as published by the Free Software Foundation. It is distributed in the hope that
+it will be useful, but **WITHOUT ANY WARRANTY**; without even the implied
+warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+In practice: you're free to use, study, modify, and share it. Any distributed
+derivative must also stay open source under the GPL — so it can never be turned
+into a closed, paid clone. See [LICENSE](LICENSE) for the full text.

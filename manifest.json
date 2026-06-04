@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "minAppVersion": "1.4.0",
   "description": "Inline verse numbering and referencing system for Obsidian notes.",
-  "author": "",
+  "author": "Gabriel Renderos",
   "authorUrl": "",
   "isDesktopOnly": false
 }

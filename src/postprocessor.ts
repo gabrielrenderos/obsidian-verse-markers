@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Gabriel Renderos
+
 /**
  * postprocessor.ts
  * Reading view MarkdownPostProcessor for verse markers.

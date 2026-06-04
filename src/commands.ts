@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Gabriel Renderos
+
 /**
  * commands.ts
  * "Copy verse reference" and "Copy verse range reference" commands.

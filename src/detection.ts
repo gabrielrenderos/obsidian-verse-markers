@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Gabriel Renderos
+
 /**
  * detection.ts
  * Single source of truth for the verse marker regex and content utilities.

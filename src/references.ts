@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2025 Gabriel Renderos
+
 /**
  * references.ts
  * Hover preview and link resolution for verse references.
