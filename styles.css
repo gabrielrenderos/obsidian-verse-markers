@@ -52,6 +52,55 @@
   margin-bottom: 1em;
 }
 
+/* Native embed of a verse fragment: ![[File#verse-3:7]].
+ *
+ * The container reuses Obsidian's own .markdown-embed classes so themes give
+ * it the standard embed card (border, hover chrome) for free. All sizing is
+ * in `em` so the card scales with the surrounding document text — it reads as
+ * part of the normal flow, not a fixed-size widget. */
+/* Title is the file name. We reuse Obsidian's native `.markdown-embed-title`
+ * class so its font matches a whole-file embed exactly (normal-sized bold) —
+ * no font overrides here. Only the padding is ours. */
+.verse-embed .markdown-embed-title {
+  padding: 0 0 0 1.5em;
+}
+
+/* Obsidian gives .markdown-embed-content its own default padding, and that
+ * default DIFFERS between reading view and Live Preview — which is why the
+ * verse text hugs the left border in one view but sits inset in the other.
+ * Zero it here so every bit of spacing comes from our own rules (title +
+ * preview) and the two views render identically. The empty-state rule below is
+ * more specific, so it still keeps its own padding. */
+.verse-embed .markdown-embed-content {
+  padding: 0;
+  margin: 0;
+}
+
+.verse-embed .verse-embed-preview {
+  /* L/R match Obsidian's standard content inset (native embeds use this). */
+  padding: 0 0.36em 0 1.5em;
+}
+
+/* Trim the leading/trailing margins of the first/last blocks (e.g. a
+ * blockquote's margin-top/margin-bottom) so the content sits flush at both
+ * ends — like native embeds do. Without the first-child trim, the first block's
+ * top margin leaks in and looks like an unintended gap below the title; with it
+ * trimmed, the title↔content gap is controlled solely by the title's padding. */
+.verse-embed .verse-embed-preview > *:first-child,
+.verse-embed .verse-embed-preview > *:first-child > *:first-child {
+  margin-top: 0;
+}
+.verse-embed .verse-embed-preview > *:last-child,
+.verse-embed .verse-embed-preview > *:last-child > *:last-child {
+  margin-bottom: 0;
+}
+
+.verse-embed.verse-embed-empty .markdown-embed-content {
+  padding: 0.4em 0.7em;
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+
 /* Post-navigation flash highlight.
  *
  * Implemented by wrapping the in-range text nodes in <span class="verse-flash">

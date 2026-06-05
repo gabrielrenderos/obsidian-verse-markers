@@ -26,6 +26,7 @@ import {
   resolveVerseLink,
   attachVerseHoverPreview,
 } from "./references";
+import { registerVerseEmbeds } from "./embeds";
 import {
   VerseMarkersSettings,
   DEFAULT_SETTINGS,
@@ -55,6 +56,10 @@ export default class VerseMarkersPlugin extends Plugin {
       versePostProcessor(el, ctx);
       this.wireVerseAnchors(el);
     });
+
+    // Native embed support: ![[File#verse-3:7]] in Reading view AND Live
+    // Preview, by wrapping the markdown embed creator (see embeds.ts).
+    registerVerseEmbeds(this);
 
     // Commands
     registerCommands(this);

@@ -11,6 +11,7 @@ Originally built for study notes over scripture, but it works for any document w
 - **Disjoint (skip-verse) references** — `[[File#verse-4:6/8:10]]` cites verses 4–6 **and** 8–10 while excluding 7, for lectionary-style passages that skip verses. The popover shows only the cited verses and the temporary highlight covers each piece, leaving the gaps untouched.
 - **Authored verse parts** — markers may carry a part suffix, e.g. `[5a]`, `[5b]`, `[12bc]`. A single canonical verse can be split into scattered, separately-marked pieces (even interleaved with other verses) and still be referenced as a whole or by individual part.
 - **Hover previews for ranges** — hover a `verse-N:M` link to see the quoted verse text inline without opening the file.
+- **Verse embeds** — prefix any reference with `!` (`![[File#verse-3:7]]`) to transclude the cited verse(s) inline as a native-looking embed card, in **both reading view and Live Preview**. Single verses, ranges, authored/derived parts, and disjoint refs all work.
 - **Two "Copy reference" commands** — grab a wiki-link for the verse near your cursor, or for a selection spanning multiple verses.
 - **URI protocol handler** — `obsidian://verse-markers?file=<path>&verse=<N>&part=<a>` deep-links into a verse from outside Obsidian.
 - **Multi-line and heading-split verses** — a verse can span multiple lines, include blockquotes, and be broken up by headings without losing its identity.
@@ -165,6 +166,21 @@ Lectionary readings often skip verses inside a passage — the Spanish notation 
 - The temporary highlight covers every cited verse and stops at each gap, so excluded verses are never highlighted. Each contiguous block gets its own rounded highlight.
 - Clicking navigates to the first segment's start verse.
 
+### Embedding verses
+
+Prefix any reference with `!` to transclude it inline instead of linking to it:
+
+| Syntax                      | Renders                                            |
+|-----------------------------|----------------------------------------------------|
+| `![[File#verse-3]]`         | Verse 3, inline                                    |
+| `![[File#verse-3:7]]`       | Verses 3–7, inline                                 |
+| `![[File#verse-4:6/8:10]]`  | Disjoint range, inline (7 excluded)                |
+| `![[File#verse-3a]]`        | A single authored/derived part, inline             |
+
+The embed renders as a native-style card — a file-name title (the same bold `embed-title` styling Obsidian uses for whole-file embeds) plus the verse content — and the corner icon opens the source note at the cited verse. It works in **both reading view and Live Preview**.
+
+Obsidian's built-in transclusion can only resolve fragments that name a real heading or block, so it can't render `verse-` fragments on its own; the plugin hooks Obsidian's embed pipeline to fill these embeds itself. A `|display text` alias on an embed is ignored — the title is always the file name.
+
 ### Shorthand (opt-in)
 
 Enable **"Enable shorthand reference syntax"** in settings to also accept:
@@ -272,6 +288,7 @@ src/
   detection.ts      Canonical verse regex, content extraction, fragment parsers.
   postprocessor.ts  Reading-view DOM rewrite + heading-split part anchor injection.
   references.ts     Link resolution, scroll-to-verse, range hover preview.
+  embeds.ts         Native ![[File#verse-…]] embed rendering (reading + Live Preview).
   commands.ts       "Copy verse reference" command registrations.
   settings.ts       Settings interface, defaults, settings tab UI.
   main.ts           Plugin entry point (wires everything together).

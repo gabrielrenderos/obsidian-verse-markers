@@ -28,7 +28,7 @@ __export(main_exports, {
   default: () => VerseMarkersPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/detection.ts
 var VERSE_MARKER_REGEX = /\[\d+[a-z]*\](?=\s|$)/gm;
@@ -1300,14 +1300,132 @@ function buildVerseFlashRanges(segments) {
   return ranges;
 }
 
-// src/settings.ts
+// src/embeds.ts
 var import_obsidian3 = require("obsidian");
+function wrapAsDocumentBlocks(preview) {
+  const doc = preview.ownerDocument;
+  for (const child of Array.from(preview.children)) {
+    const wrapper = doc.createElement("div");
+    wrapper.className = `el-${child.tagName.toLowerCase()}`;
+    preview.insertBefore(wrapper, child);
+    wrapper.appendChild(child);
+  }
+}
+var VerseEmbed = class extends import_obsidian3.Component {
+  constructor(plugin, ctx, file, fragment) {
+    super();
+    this.plugin = plugin;
+    this.ctx = ctx;
+    this.file = file;
+    this.fragment = fragment;
+    this.renderToken = 0;
+  }
+  onload() {
+    void this.render();
+  }
+  /** Obsidian calls this to (re)render when the source file changes. */
+  async loadFile() {
+    await this.render();
+  }
+  async render() {
+    const myToken = ++this.renderToken;
+    const allowShorthand = this.plugin.settings.enableShorthandSyntax;
+    const segments = parseVerseSegments(this.fragment, allowShorthand);
+    let markdown = null;
+    if (segments) {
+      markdown = await buildSegmentsPreviewMarkdown(
+        this.plugin.app,
+        this.file,
+        segments,
+        this.plugin.settings.hoverPreviewMaxVerses
+      );
+    }
+    if (myToken !== this.renderToken)
+      return;
+    const container = this.ctx.containerEl;
+    container.empty();
+    container.removeClass("verse-embed-empty");
+    container.addClasses(["markdown-embed", "is-loaded", "verse-embed"]);
+    container.createDiv({
+      cls: "embed-title markdown-embed-title",
+      text: this.file.basename
+    });
+    if (!markdown) {
+      container.addClass("verse-embed-empty");
+      container.createDiv({
+        cls: "markdown-embed-content",
+        text: `Couldn't find "${this.fragment}"`
+      });
+      return;
+    }
+    const content = container.createDiv({ cls: "markdown-embed-content" });
+    const doc = container.ownerDocument;
+    const preview = doc.createElement("div");
+    preview.className = "markdown-rendered verse-embed-preview";
+    await import_obsidian3.MarkdownRenderer.render(
+      this.plugin.app,
+      markdown,
+      preview,
+      this.file.path,
+      this
+    );
+    if (myToken !== this.renderToken)
+      return;
+    wrapAsDocumentBlocks(preview);
+    content.appendChild(preview);
+    const link = container.createEl("a", {
+      cls: "markdown-embed-link",
+      attr: { "aria-label": "Open link" }
+    });
+    (0, import_obsidian3.setIcon)(link, "lucide-maximize-2");
+    link.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      void resolveVerseLink(
+        this.plugin.app,
+        this.file,
+        this.fragment,
+        allowShorthand
+      );
+    });
+  }
+};
+function registerVerseEmbeds(plugin) {
+  try {
+    const registry = plugin.app.embedRegistry;
+    if (!registry || typeof registry.embedByExtension !== "object")
+      return;
+    const original = registry.embedByExtension["md"];
+    if (typeof original !== "function")
+      return;
+    const creator = (ctx, file, subpath) => {
+      const fragment = (subpath != null ? subpath : "").replace(/^#/, "");
+      if (fragment) {
+        const segments = parseVerseSegments(
+          fragment,
+          plugin.settings.enableShorthandSyntax
+        );
+        if (segments)
+          return new VerseEmbed(plugin, ctx, file, fragment);
+      }
+      return original(ctx, file, subpath);
+    };
+    registry.embedByExtension["md"] = creator;
+    plugin.register(() => {
+      registry.embedByExtension["md"] = original;
+    });
+  } catch (e) {
+  }
+}
+
+// src/settings.ts
+var import_obsidian4 = require("obsidian");
 var DEFAULT_SETTINGS = {
   enableHoverPreviews: true,
   hoverPreviewMaxVerses: 20,
   enableShorthandSyntax: false
 };
-var VerseMarkersSettingTab = class extends import_obsidian3.PluginSettingTab {
+var VerseMarkersSettingTab = class extends import_obsidian4.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -1315,7 +1433,7 @@ var VerseMarkersSettingTab = class extends import_obsidian3.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian3.Setting(containerEl).setName("Reference syntax").setHeading();
+    new import_obsidian4.Setting(containerEl).setName("Reference syntax").setHeading();
     const syntaxEl = containerEl.createEl("div", {
       cls: "setting-item-description verse-markers-syntax-ref"
     });
@@ -1328,13 +1446,13 @@ var VerseMarkersSettingTab = class extends import_obsidian3.PluginSettingTab {
     syntaxEl.appendText(
       "Shorthand (opt-in below) \u2014 [[File#3]] / [[File#3a]] / [[File#3:7]]"
     );
-    new import_obsidian3.Setting(containerEl).setName("Enable range hover previews").setDesc("Show a popover with verse content when hovering over [[FILE#verse-N:M]] links.").addToggle(
+    new import_obsidian4.Setting(containerEl).setName("Enable range hover previews").setDesc("Show a popover with verse content when hovering over [[FILE#verse-N:M]] links.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableHoverPreviews).onChange(async (value) => {
         this.plugin.settings.enableHoverPreviews = value;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Enable shorthand reference syntax").setDesc(
+    new import_obsidian4.Setting(containerEl).setName("Enable shorthand reference syntax").setDesc(
       'Recognize [[File#3]] and [[File#3:7]] in addition to the default [[File#verse-3]] form. Warning: enabling this will intercept links to headings literally named "3" or "3:7".'
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableShorthandSyntax).onChange(async (value) => {
@@ -1342,7 +1460,7 @@ var VerseMarkersSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Max verses in hover preview").setDesc("Maximum number of verses to display in a range hover preview.").addText(
+    new import_obsidian4.Setting(containerEl).setName("Max verses in hover preview").setDesc("Maximum number of verses to display in a range hover preview.").addText(
       (text) => text.setPlaceholder("20").setValue(String(this.plugin.settings.hoverPreviewMaxVerses)).onChange(async (value) => {
         const num = parseInt(value, 10);
         if (!isNaN(num) && num > 0) {
@@ -1355,7 +1473,7 @@ var VerseMarkersSettingTab = class extends import_obsidian3.PluginSettingTab {
 };
 
 // src/main.ts
-var VerseMarkersPlugin = class extends import_obsidian4.Plugin {
+var VerseMarkersPlugin = class extends import_obsidian5.Plugin {
   constructor() {
     super(...arguments);
     /** Disposers for hover-preview listeners attached to rendered anchors. */
@@ -1368,6 +1486,7 @@ var VerseMarkersPlugin = class extends import_obsidian4.Plugin {
       versePostProcessor(el, ctx);
       this.wireVerseAnchors(el);
     });
+    registerVerseEmbeds(this);
     registerCommands(this);
     this.registerObsidianProtocolHandler("verse-markers", async (params) => {
       const verse = params["verse"];
@@ -1375,7 +1494,7 @@ var VerseMarkersPlugin = class extends import_obsidian4.Plugin {
       if (!verse || !filePath)
         return;
       const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (!(file instanceof import_obsidian4.TFile))
+      if (!(file instanceof import_obsidian5.TFile))
         return;
       const vm = /^(\d+)([a-z]*)$/.exec(verse);
       if (!vm)
@@ -1416,7 +1535,7 @@ var VerseMarkersPlugin = class extends import_obsidian4.Plugin {
       const fragment = href.slice(hashIdx + 1);
       const onClick = (ev) => {
         const file = this.app.metadataCache.getFirstLinkpathDest(filePart, "");
-        if (!(file instanceof import_obsidian4.TFile))
+        if (!(file instanceof import_obsidian5.TFile))
           return;
         ev.preventDefault();
         ev.stopPropagation();
