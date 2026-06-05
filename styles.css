@@ -39,7 +39,14 @@
  * native `.popover.hover-popover` styling; inside we reuse `.markdown-embed`
  * for the same reason. We ship NO custom styling here — `.verse-hover-preview`
  * is only an identifier the plugin adds so it can recognize its own popovers
- * (e.g. to avoid double-wiring their content). */
+ * (e.g. to avoid double-wiring their content).
+ *
+ * While async content renders we hide the popover (it still lays out, so we can
+ * measure it) and reveal it once we've placed it against the viewport. The hide
+ * lives in this class rather than inline so it's theme-overridable. */
+.verse-hover-preview.verse-hover-measuring {
+  visibility: hidden;
+}
 
 /* Settings: spacing under the reference-syntax description block. */
 .verse-markers-syntax-ref {

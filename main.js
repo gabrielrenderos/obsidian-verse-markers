@@ -793,7 +793,7 @@ function openVersePopover(plugin, hoverParent, targetEl, linktext, sourcePath) {
   popover.__verseTargetEl = targetEl;
   popover.hoverPopover = null;
   popover.hoverEl.addClass("verse-hover-preview");
-  popover.hoverEl.style.visibility = "hidden";
+  popover.hoverEl.addClass("verse-hover-measuring");
   let alive = true;
   popover.register(() => {
     alive = false;
@@ -862,7 +862,7 @@ async function renderVersePopover(plugin, popover, isAlive, file, fragment, sour
   const targetEl = (_b = popover.__verseTargetEl) != null ? _b : null;
   if (targetEl)
     positionVersePopover(hoverEl, targetEl);
-  hoverEl.style.visibility = "";
+  hoverEl.removeClass("verse-hover-measuring");
 }
 var POPOVER_GAP_PX = 4;
 var POPOVER_VIEWPORT_MARGIN_PX = 8;

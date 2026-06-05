@@ -337,7 +337,7 @@ export function registerVersePagePreview(plugin: VerseMarkersPlugin): void {
     const instance = getPagePreviewInstance(plugin.app);
     if (!instance) return;
 
-    const original = instance.onLinkHover.bind(instance) as OnLinkHover;
+    const original = instance.onLinkHover.bind(instance);
     const wrapped: OnLinkHover = (
       hoverParent,
       targetEl,
@@ -407,8 +407,9 @@ function openVersePopover(
   // against the viewport. Obsidian positions the popover at show time based on
   // the still-empty frame, so without this the popover would flash in the wrong
   // spot (and never flip above/clamp like the native one) before our content
-  // arrives. visibility:hidden still lays out, so we can measure it.
-  popover.hoverEl.style.visibility = "hidden";
+  // arrives. The class only sets visibility:hidden, which still lays out so we
+  // can measure it (styles live in CSS, not inline).
+  popover.hoverEl.addClass("verse-hover-measuring");
 
   let alive = true;
   popover.register(() => {
@@ -501,7 +502,7 @@ async function renderVersePopover(
   // frame was still empty, hence this final pass.
   const targetEl = popover.__verseTargetEl ?? null;
   if (targetEl) positionVersePopover(hoverEl, targetEl);
-  hoverEl.style.visibility = "";
+  hoverEl.removeClass("verse-hover-measuring");
 }
 
 /** Vertical gap between the link and the popover, and viewport edge margin. */
