@@ -22,10 +22,7 @@
 import { Plugin, TFile } from "obsidian";
 import { versePostProcessor, collectVerseAnchors } from "./postprocessor";
 import { registerCommands } from "./commands";
-import {
-  resolveVerseLink,
-  attachVerseHoverPreview,
-} from "./references";
+import { resolveVerseLink, registerVersePagePreview } from "./references";
 import { registerVerseEmbeds } from "./embeds";
 import {
   VerseMarkersSettings,
@@ -51,11 +48,16 @@ export default class VerseMarkersPlugin extends Plugin {
 
     // Reading view post-processor: rewrites [N] text → spans, injects
     // part-b/c/… continuation anchors for heading-split verses, and wires
-    // click navigation / hover previews on verse-fragment links.
+    // click navigation on verse-fragment links.
     this.registerMarkdownPostProcessor((el, ctx) => {
       versePostProcessor(el, ctx);
       this.wireVerseAnchors(el);
     });
+
+    // Hover previews: intercept the core "Page preview" plugin so verse
+    // fragments render through Obsidian's own HoverPopover, with native
+    // nesting/keep-alive in every context (see references.ts).
+    registerVersePagePreview(this);
 
     // Native embed support: ![[File#verse-3:7]] in Reading view AND Live
     // Preview, by wrapping the markdown embed creator (see embeds.ts).
@@ -100,11 +102,17 @@ export default class VerseMarkersPlugin extends Plugin {
   }
 
   /**
-   * For each rendered anchor whose fragment is verse-N or verse-N:M, attach
-   * a click handler that invokes our verse-aware navigator, and (for ranges)
-   * a mouse-hover preview listener.
+   * For each rendered anchor whose fragment is verse-N or verse-N:M, attach a
+   * click handler that invokes our verse-aware navigator. Hover previews are
+   * handled separately by the page-preview hook (registerVersePagePreview).
    */
   private wireVerseAnchors(el: HTMLElement): void {
+    // Our own hover popovers render their content through MarkdownRenderer,
+    // which re-runs this post-processor on the popover body. Those anchors are
+    // already wired (click + nested hover) by references.ts; wiring them again
+    // here would stack a duplicate click handler. Skip popover content.
+    if (el.closest(".verse-hover-preview")) return;
+
     const allowShorthand = this.settings.enableShorthandSyntax;
 
     const anchors = collectVerseAnchors(el, allowShorthand);
@@ -129,12 +137,6 @@ export default class VerseMarkersPlugin extends Plugin {
       };
       a.addEventListener("click", onClick);
       this.hoverDisposers.push(() => a.removeEventListener("click", onClick));
-
-      // Hover preview for every verse anchor (single + range). This also
-      // suppresses Obsidian's native page-preview, which otherwise shows
-      // an "Unable to find 'verse-N'" error for these fragments.
-      const dispose = attachVerseHoverPreview(this, a, href);
-      this.hoverDisposers.push(dispose);
     }
   }
 }

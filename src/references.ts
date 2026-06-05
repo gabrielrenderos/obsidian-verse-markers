@@ -20,11 +20,12 @@
 
 import {
   App,
-  Component,
+  HoverPopover,
   MarkdownRenderer,
   MarkdownView,
   TFile,
   setIcon,
+  type HoverParent,
 } from "obsidian";
 import {
   appendMissingFootnoteDefinitions,
@@ -41,74 +42,6 @@ import {
 } from "./detection";
 import { collectVerseAnchors } from "./postprocessor";
 import type VerseMarkersPlugin from "./main";
-
-/* ---------------------------------------------------------------------------
- * Nested popover model
- * ---------------------------------------------------------------------------
- * Each visible popover registers a node in `popoverNodes`. Nodes form a tree
- * keyed by ancestry: when a popover is opened by hovering an anchor that
- * lives inside another popover's rendered content, the new node becomes a
- * child of that popover. Hide policy:
- *   - A node never auto-hides while it has open children (the user is
- *     interacting with a descendant).
- *   - When a child closes, the parent re-evaluates: if the cursor is no
- *     longer over the parent, schedule a hide.
- *   - When a node hides, all of its descendants hide first (so closing a
- *     parent reliably tears down the whole subtree).
- * Depth is capped at MAX_POPOVER_DEPTH to avoid runaway nesting.
- * ------------------------------------------------------------------------- */
-
-interface PopoverNode {
-  el: HTMLElement;
-  parent: PopoverNode | null;
-  children: Set<PopoverNode>;
-  depth: number;
-  /** Cursor currently over the popover's own frame (NOT its source anchor). */
-  hovered: boolean;
-  cancelHide: () => void;
-  scheduleHide: () => void;
-  hide: () => void;
-}
-
-/**
- * Hard cap on popover chain depth. Realistic chains are 2–3 deep; this is
- * intentionally well above that so we never deny a legitimate use, but
- * still bounded so a pathological link-cycle can't keep allocating
- * components forever.
- */
-const MAX_POPOVER_DEPTH = 16;
-
-/** Live popover-node lookup, used to find the parent of a nested popover. */
-const popoverNodes: WeakMap<HTMLElement, PopoverNode> = new WeakMap();
-
-/**
- * Walks up from `node` to find the nearest enclosing popover frame and
- * returns its registered PopoverNode, or null if `node` is not inside any
- * verse popover.
- */
-function findEnclosingPopoverNode(node: Node | null): PopoverNode | null {
-  let cur: Node | null = node;
-  while (cur) {
-    if (
-      cur.nodeType === Node.ELEMENT_NODE &&
-      (cur as HTMLElement).classList.contains("verse-hover-preview")
-    ) {
-      const found = popoverNodes.get(cur as HTMLElement);
-      if (found) return found;
-    }
-    cur = cur.parentNode;
-  }
-  return null;
-}
-
-/** Cancels the hide timer for `node` and every ancestor up to the root. */
-function cancelHideUpChain(node: PopoverNode | null): void {
-  let cur = node;
-  while (cur) {
-    cur.cancelHide();
-    cur = cur.parent;
-  }
-}
 
 /** Converts a single lowercase letter "a".."z" to a zero-based index. */
 function partToIndex(part: string): number {
@@ -324,353 +257,314 @@ export async function buildSegmentsPreviewMarkdown(
   return appendMissingFootnoteDefinitions(blocks.join("\n\n"), content);
 }
 
-/**
- * Delay before hiding the popover after the mouse leaves the anchor or the
- * popover itself. This gap lets the user transition the cursor across the
- * gap between anchor and popover without the popover disappearing, and
- * makes the scrollable popover content actually reachable.
- */
-const HIDE_DELAY_MS = 200;
-
-/** Vertical gap between the link and the popover. */
-const POPOVER_GAP_PX = 4;
-/** Margin to keep clear of the viewport edge when clipping. */
-const VIEWPORT_MARGIN_PX = 8;
-
-/**
- * Positions a popover under (or above, if there's no room below) its anchor
- * element, left-aligned with the link's start. Mirrors the placement
- * Obsidian's native page-preview uses: the popover's location is determined
- * by where the link is, NOT by where the cursor entered it.
+/* ---------------------------------------------------------------------------
+ * Hover previews via the core "Page preview" plugin
+ * ---------------------------------------------------------------------------
+ * Verse fragments render through Obsidian's own `HoverPopover`, created with the
+ * SAME `hoverParent` the core page-preview plugin hands us. Obsidian then
+ * manages the parent⇄child popover chain itself, so nesting and keep-alive work
+ * natively in EVERY context — a verse link inside a native footnote popover
+ * keeps that footnote popover open, nested verse popovers stay open while the
+ * cursor is in any descendant, etc.
  *
- * Reads the popover's current bounding rect, so it should be called both
- * before append (for an initial placement based on min size) and again
- * after the content renders (so post-render size can flip/shift it).
- */
-function positionPopover(popover: HTMLElement, anchor: HTMLElement): void {
-  const linkRect = anchor.getBoundingClientRect();
-  const popRect = popover.getBoundingClientRect();
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
+ * We hook by wrapping page-preview's `onLinkHover` (the handler behind the
+ * `hover-link` event): for a verse fragment we open our popover and stop; for
+ * any other link we defer to the original. Intercepting also means the native
+ * "Unable to find 'verse-N'" popover never fires for our synthetic anchors.
+ * For verse links inside OUR OWN popover (which Obsidian doesn't watch for
+ * hovers) we re-emit `hover-link` ourselves with our popover as the parent, so
+ * the same path opens the nested popover and links it into the chain.
+ *
+ * `onLinkHover` / `internalPlugins` are non-public, so this is all wrapped
+ * defensively: if the shape ever changes we leave native behavior untouched.
+ * ------------------------------------------------------------------------- */
 
-  let left = linkRect.left + window.scrollX;
-  let top = linkRect.bottom + window.scrollY + POPOVER_GAP_PX;
+type OnLinkHover = (
+  hoverParent: HoverParent,
+  targetEl: HTMLElement | null,
+  linktext: string,
+  sourcePath: string,
+  ...rest: unknown[]
+) => unknown;
 
-  // Right edge: shift left so the popover stays inside the viewport.
-  const popWidth = popRect.width || 0;
-  if (popWidth > 0 && left + popWidth > window.scrollX + vw - VIEWPORT_MARGIN_PX) {
-    left = window.scrollX + vw - popWidth - VIEWPORT_MARGIN_PX;
-    if (left < window.scrollX + VIEWPORT_MARGIN_PX) {
-      left = window.scrollX + VIEWPORT_MARGIN_PX;
-    }
-  }
-
-  // Bottom edge: if the popover would spill below the viewport, place it
-  // above the link instead — but only if there's actually more room there.
-  const popHeight = popRect.height || 0;
-  if (popHeight > 0 && top + popHeight > window.scrollY + vh - VIEWPORT_MARGIN_PX) {
-    const aboveTop = linkRect.top + window.scrollY - popHeight - POPOVER_GAP_PX;
-    const spaceBelow = vh - linkRect.bottom;
-    const spaceAbove = linkRect.top;
-    if (spaceAbove > spaceBelow && aboveTop >= window.scrollY + VIEWPORT_MARGIN_PX) {
-      top = aboveTop;
-    }
-  }
-
-  popover.style.left = `${left}px`;
-  popover.style.top = `${top}px`;
+interface PagePreviewInstance {
+  onLinkHover: OnLinkHover;
 }
 
 /**
- * Attaches a mouse-hover preview to a verse-reference anchor. Handles both
- * single-verse fragments (verse-3, verse-3a) and ranges (verse-3:7, with or
- * without part suffixes on either endpoint).
- *
- * Behavior modeled on Obsidian's native page-preview:
- *   - max-sized, scrollable popover (CSS)
- *   - short delay before hiding, so the cursor can cross into the popover
- *     to scroll its contents
- *   - "Open note" icon button in the top-right that navigates to the verse
- *
- * Also suppresses Obsidian's native page-preview on this anchor so the core
- * "Unable to find 'verse-N'" popover doesn't appear. Returns a disposer.
+ * Our popovers double as HoverParents for their nested children and carry a
+ * marker (the source anchor) so we can recognize and de-dupe them.
  */
-export function attachVerseHoverPreview(
-  plugin: VerseMarkersPlugin,
-  anchorEl: HTMLElement,
-  linkText: string
-): () => void {
-  let node: PopoverNode | null = null;
-  let popoverComponent: Component | null = null;
-  let hideTimer: number | null = null;
-  // Monotonic counter so we can cancel a stale async show() when the user
-  // moves off the anchor before the markdown finishes rendering.
-  let showToken = 0;
+type VerseHoverPopover = HoverPopover &
+  HoverParent & { __verseTargetEl?: HTMLElement | null };
 
-  const cancelHide = (): void => {
-    if (hideTimer !== null) {
-      window.clearTimeout(hideTimer);
-      hideTimer = null;
+/** Reaches the non-public core "page-preview" plugin instance, or null. */
+function getPagePreviewInstance(app: App): PagePreviewInstance | null {
+  const internal = (
+    app as unknown as {
+      internalPlugins?: {
+        getPluginById?: (id: string) => { instance?: unknown } | null;
+        plugins?: Record<string, { instance?: unknown } | undefined>;
+      };
     }
-  };
+  ).internalPlugins;
+  const plugin =
+    internal?.getPluginById?.("page-preview") ??
+    internal?.plugins?.["page-preview"];
+  const instance = plugin?.instance as PagePreviewInstance | undefined;
+  if (!instance || typeof instance.onLinkHover !== "function") return null;
+  return instance;
+}
 
-  /**
-   * Schedules a hide unless this popover has open child popovers — in that
-   * case the user is still interacting with a descendant and we must not
-   * tear down the chain. The child's own hide() will re-trigger this on
-   * its way out, so the parent collapses naturally afterwards.
-   */
-  const scheduleHide = (): void => {
-    cancelHide();
-    if (node && node.children.size > 0) return;
-    hideTimer = window.setTimeout(hide, HIDE_DELAY_MS);
-  };
+/** Returns the verse fragment of a link target, or null if it isn't one. */
+function verseFragmentOf(
+  linktext: string,
+  allowShorthand: boolean
+): string | null {
+  const hashIndex = linktext.indexOf("#");
+  if (hashIndex === -1) return null;
+  const fragment = linktext.slice(hashIndex + 1);
+  return parseVerseSegments(fragment, allowShorthand) ? fragment : null;
+}
 
-  const hide = (): void => {
-    cancelHide();
-    showToken++; // invalidate any in-flight show()
+/**
+ * Wraps the core page-preview's `onLinkHover` so verse fragments render through
+ * our HoverPopover. Restores the original on unload. No-op (native behavior
+ * untouched) if the non-public hook isn't available.
+ */
+export function registerVersePagePreview(plugin: VerseMarkersPlugin): void {
+  try {
+    const instance = getPagePreviewInstance(plugin.app);
+    if (!instance) return;
 
-    // Hide all descendants first so the subtree disappears as a unit.
-    // Iterate over a copy because each child.hide() removes itself from
-    // node.children via its parent-bookkeeping below.
-    if (node) {
-      const children = Array.from(node.children);
-      for (const c of children) c.hide();
-    }
-
-    if (popoverComponent) {
-      popoverComponent.unload();
-      popoverComponent = null;
-    }
-    if (node) {
-      if (node.el.parentNode) node.el.parentNode.removeChild(node.el);
-      popoverNodes.delete(node.el);
-      const parent = node.parent;
-      if (parent) {
-        parent.children.delete(node);
-        // If the cursor is no longer over the parent's frame, the chain
-        // should now collapse: schedule the parent's hide. If the cursor
-        // IS over the parent, scheduleHide is a no-op until mouseleave.
-        if (!parent.hovered) parent.scheduleHide();
+    const original = instance.onLinkHover.bind(instance) as OnLinkHover;
+    const wrapped: OnLinkHover = (
+      hoverParent,
+      targetEl,
+      linktext,
+      sourcePath,
+      ...rest
+    ) => {
+      try {
+        if (verseFragmentOf(linktext, plugin.settings.enableShorthandSyntax)) {
+          // Always suppress the native (unresolvable) popover for verse
+          // anchors; only build our own when previews are enabled.
+          if (plugin.settings.enableHoverPreviews) {
+            openVersePopover(
+              plugin,
+              hoverParent,
+              targetEl,
+              linktext,
+              sourcePath ?? ""
+            );
+          }
+          return;
+        }
+      } catch {
+        // Fall through to native on any unexpected error.
       }
-      node = null;
-    }
-  };
-
-  const show = async (ev: MouseEvent): Promise<void> => {
-    cancelHide();
-    if (!plugin.settings.enableHoverPreviews) return;
-    // Already visible — don't rebuild.
-    if (node) return;
-
-    const hashIndex = linkText.indexOf("#");
-    if (hashIndex === -1) return;
-
-    const filePart = linkText.slice(0, hashIndex);
-    const fragment = linkText.slice(hashIndex + 1);
-    const allowShorthand = plugin.settings.enableShorthandSyntax;
-
-    const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, "");
-    if (!(file instanceof TFile)) return;
-
-    // Identify parent popover (if this anchor lives inside one) and bail
-    // out early if we'd exceed the depth cap. Using `>=` because the new
-    // popover would sit one level deeper than its parent.
-    const parentNode = findEnclosingPopoverNode(anchorEl);
-    if (parentNode && parentNode.depth >= MAX_POPOVER_DEPTH - 1) return;
-
-    const myToken = ++showToken;
-
-    // One unified path handles single verses, ranges, and disjoint
-    // multi-segment references (verse-4:6/8:10) alike.
-    let markdown: string | null = null;
-    const segments = parseVerseSegments(fragment, allowShorthand);
-    if (segments) {
-      markdown = await buildSegmentsPreviewMarkdown(
-        plugin.app,
-        file,
-        segments,
-        plugin.settings.hoverPreviewMaxVerses
-      );
-    }
-
-    // User moved off before we finished building content.
-    if (myToken !== showToken) return;
-    if (!markdown) return;
-
-    // Build the popover using Obsidian's own class hierarchy so themes
-    // style it identically to the native page-preview popover:
-    //
-    //   .popover.hover-popover        outer frame (position, border, shadow, size)
-    //     .markdown-embed.is-loaded   inner embed card
-    //       .markdown-embed-content   scrollable body
-    //         .markdown-preview-view.markdown-rendered
-    //           ... our markdown content ...
-    //       .markdown-embed-link      the corner "open" arrow
-    //
-    // Position is anchored to the link element's bounding rect (NOT the
-    // cursor) so it lands in the same place regardless of where the
-    // pointer entered, matching Obsidian's native popover behavior.
-    const el = activeDocument.createElement("div");
-    el.className = "popover hover-popover verse-hover-preview";
-
-    // Build the node up-front so closures below can reference it by capture.
-    const newNode: PopoverNode = {
-      el,
-      parent: parentNode,
-      children: new Set(),
-      depth: parentNode ? parentNode.depth + 1 : 0,
-      hovered: false,
-      cancelHide,
-      scheduleHide,
-      hide,
+      return original(hoverParent, targetEl, linktext, sourcePath, ...rest);
     };
 
-    // Mouse on this popover: cancel hide for every ancestor too, so
-    // moving the cursor into a deeply-nested popover keeps the whole
-    // chain alive.
-    el.addEventListener("mouseenter", () => {
-      newNode.hovered = true;
-      cancelHideUpChain(newNode);
+    instance.onLinkHover = wrapped;
+    plugin.register(() => {
+      if (instance.onLinkHover === wrapped) instance.onLinkHover = original;
     });
-    el.addEventListener("mouseleave", () => {
-      newNode.hovered = false;
-      scheduleHide();
-    });
-
-    const embed = activeDocument.createElement("div");
-    embed.className = "markdown-embed is-loaded";
-    el.appendChild(embed);
-
-    const contentEl = activeDocument.createElement("div");
-    contentEl.className = "markdown-embed-content";
-    embed.appendChild(contentEl);
-
-    const previewEl = activeDocument.createElement("div");
-    previewEl.className = "markdown-preview-view markdown-rendered";
-    contentEl.appendChild(previewEl);
-
-    // Corner "open note" affordance — same class the native hover popover
-    // uses, so themes style the chrome (position, hover background) for
-    // free. The icon is the diagonal-arrows glyph that matches Obsidian's
-    // current native popover.
-    const openLink = activeDocument.createElement("a");
-    openLink.className = "markdown-embed-link";
-    openLink.setAttribute("aria-label", "Open link");
-    setIcon(openLink, "lucide-move-diagonal-2");
-    openLink.addEventListener("click", (clickEv) => {
-      clickEv.preventDefault();
-      clickEv.stopPropagation();
-      // Closing from the root collapses the whole chain at once.
-      hideRoot(newNode);
-      void resolveVerseLink(plugin.app, file, fragment, allowShorthand);
-    });
-    embed.appendChild(openLink);
-
-    // Initial placement: under the link, left-aligned with the link's
-    // start. Final placement runs again after render once we know the
-    // popover's actual size (so we can flip above / clip to viewport).
-    positionPopover(el, anchorEl);
-    activeDocument.body.appendChild(el);
-
-    // Register parent ↔ child link as soon as the DOM is in place. This is
-    // intentionally before the async render: if the parent's hide timer
-    // was already running (because mouseleave fired during the await
-    // above), the child's existence must block it from firing.
-    if (parentNode) {
-      parentNode.children.add(newNode);
-      cancelHideUpChain(parentNode);
-    }
-    popoverNodes.set(el, newNode);
-
-    const component = new Component();
-    component.load();
-    await MarkdownRenderer.render(plugin.app, markdown, previewEl, file.path, component);
-
-    // Re-position now that the rendered content has determined the size.
-    positionPopover(el, anchorEl);
-
-    // Yet another cancellation window — render might be slow.
-    if (myToken !== showToken) {
-      component.unload();
-      if (parentNode) parentNode.children.delete(newNode);
-      popoverNodes.delete(el);
-      if (el.parentNode) el.parentNode.removeChild(el);
-      return;
-    }
-
-    // Wire hover + click on every verse anchor inside the rendered
-    // preview, so links nested in the popover behave the same as those in
-    // the reading view: hovering opens a (deeper) popover, clicking
-    // navigates and closes the chain. Disposers are tied to the
-    // popover's Component so they're released on hide().
-    const innerDisposers = wirePopoverContent(plugin, previewEl, newNode);
-    component.register(() => {
-      for (const d of innerDisposers) d();
-    });
-
-    node = newNode;
-    popoverComponent = component;
-  };
-
-  // Stop the native page-preview from seeing the mouseover. Obsidian's core
-  // preview registers a document-level handler; calling stopPropagation on
-  // the target element prevents the event from bubbling up to it.
-  const suppressNative = (ev: MouseEvent): void => {
-    ev.stopPropagation();
-  };
-
-  // Click-hide: when the user follows the link, Obsidian re-renders the
-  // view and the anchor is removed before mouseleave can fire — the popover
-  // would otherwise stay orphaned in document.body forever.
-  const onClickHide = (): void => hide();
-
-  // Anchor enter/leave keep ancestors alive too: hovering a verse link
-  // inside a popover should not let any ancestor time out.
-  const onAnchorEnter = (ev: MouseEvent): void => {
-    const enclosing = findEnclosingPopoverNode(anchorEl);
-    cancelHideUpChain(enclosing);
-    void show(ev);
-  };
-
-  anchorEl.addEventListener("mouseover", suppressNative);
-  anchorEl.addEventListener("mouseenter", onAnchorEnter);
-  anchorEl.addEventListener("mouseleave", scheduleHide);
-  anchorEl.addEventListener("click", onClickHide);
-
-  return () => {
-    anchorEl.removeEventListener("mouseover", suppressNative);
-    anchorEl.removeEventListener("mouseenter", onAnchorEnter);
-    anchorEl.removeEventListener("mouseleave", scheduleHide);
-    anchorEl.removeEventListener("click", onClickHide);
-    hide();
-  };
-}
-
-/** Walks up the popover chain from `node` and hides the root, cascading. */
-function hideRoot(node: PopoverNode): void {
-  let cur: PopoverNode = node;
-  while (cur.parent) cur = cur.parent;
-  cur.hide();
+  } catch {
+    // Best effort: previews simply won't show if the private API shape changed.
+  }
 }
 
 /**
- * Wires hover + click handlers on every verse-reference anchor inside an
- * already-rendered popover preview. Returns disposer callbacks the caller
- * is responsible for invoking on teardown (we attach them to the
- * popover's own Component).
- *
- * Click closes the entire chain (root popover + descendants) before
- * navigating, so the user lands on the target note with a clean viewport.
+ * Opens a verse hover popover for `linktext` anchored at `targetEl`, parented
+ * to `hoverParent` so Obsidian links it into the popover chain.
  */
-function wirePopoverContent(
+function openVersePopover(
+  plugin: VerseMarkersPlugin,
+  hoverParent: HoverParent,
+  targetEl: HTMLElement | null,
+  linktext: string,
+  sourcePath: string
+): void {
+  const allowShorthand = plugin.settings.enableShorthandSyntax;
+  const hashIndex = linktext.indexOf("#");
+  if (hashIndex === -1) return;
+  const filePart = linktext.slice(0, hashIndex);
+  const fragment = linktext.slice(hashIndex + 1);
+
+  const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, sourcePath);
+  if (!(file instanceof TFile)) return;
+
+  // De-dupe: a live popover for this exact anchor is already (being) shown.
+  const current = hoverParent.hoverPopover as VerseHoverPopover | null;
+  if (current && current.__verseTargetEl === targetEl) return;
+
+  const popover = new HoverPopover(hoverParent, targetEl) as VerseHoverPopover;
+  popover.__verseTargetEl = targetEl;
+  popover.hoverPopover = null; // act as a HoverParent for nested popovers
+  popover.hoverEl.addClass("verse-hover-preview");
+  // Keep it invisible until our async content has rendered and we've placed it
+  // against the viewport. Obsidian positions the popover at show time based on
+  // the still-empty frame, so without this the popover would flash in the wrong
+  // spot (and never flip above/clamp like the native one) before our content
+  // arrives. visibility:hidden still lays out, so we can measure it.
+  popover.hoverEl.style.visibility = "hidden";
+
+  let alive = true;
+  popover.register(() => {
+    alive = false;
+  });
+
+  void renderVersePopover(
+    plugin,
+    popover,
+    () => alive,
+    file,
+    fragment,
+    sourcePath,
+    allowShorthand
+  );
+}
+
+/** Hides a HoverPopover (`hide` is internal-but-present; fall back to unload). */
+function hidePopover(popover: HoverPopover): void {
+  const h = popover as unknown as { hide?: () => void };
+  if (typeof h.hide === "function") h.hide();
+  else popover.unload();
+}
+
+/**
+ * Renders verse content into a popover once Obsidian has attached it. We wait
+ * for `hoverEl` to be connected before rendering: footnote refs/scroll only
+ * wire up correctly in the live DOM (detached rendering breaks them).
+ */
+async function renderVersePopover(
+  plugin: VerseMarkersPlugin,
+  popover: VerseHoverPopover,
+  isAlive: () => boolean,
+  file: TFile,
+  fragment: string,
+  sourcePath: string,
+  allowShorthand: boolean
+): Promise<void> {
+  const segments = parseVerseSegments(fragment, allowShorthand);
+  if (!segments) return;
+
+  const markdown = await buildSegmentsPreviewMarkdown(
+    plugin.app,
+    file,
+    segments,
+    plugin.settings.hoverPreviewMaxVerses
+  );
+  if (!isAlive() || !markdown) return;
+
+  const hoverEl = popover.hoverEl;
+  const win = hoverEl.ownerDocument.defaultView ?? window;
+  let frames = 0;
+  while (!hoverEl.isConnected && isAlive() && frames++ < 60) {
+    await new Promise<void>((resolve) =>
+      win.requestAnimationFrame(() => resolve())
+    );
+  }
+  if (!isAlive()) return;
+
+  // Obsidian's class hierarchy, so themes style the popover like the native
+  // page-preview: .markdown-embed > .markdown-embed-content > .markdown-rendered.
+  hoverEl.empty();
+  const embed = hoverEl.createDiv({ cls: "markdown-embed is-loaded" });
+  const content = embed.createDiv({ cls: "markdown-embed-content" });
+  const preview = content.createDiv({
+    cls: "markdown-preview-view markdown-rendered",
+  });
+
+  await MarkdownRenderer.render(plugin.app, markdown, preview, file.path, popover);
+  if (!isAlive()) return;
+
+  // Corner "open" affordance, same chrome class as the native popover.
+  const openLink = embed.createEl("a", {
+    cls: "markdown-embed-link",
+    attr: { "aria-label": "Open link" },
+  });
+  setIcon(openLink, "lucide-maximize-2");
+  openLink.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    hidePopover(popover);
+    void resolveVerseLink(plugin.app, file, fragment, allowShorthand);
+  });
+
+  wirePopoverAnchors(plugin, preview, popover, sourcePath);
+
+  // Now that the real content is in place we know the popover's true size, so
+  // place it against the viewport (flip above / clamp to edges) the way the
+  // native popover does, then reveal it. Obsidian's own placement ran while the
+  // frame was still empty, hence this final pass.
+  const targetEl = popover.__verseTargetEl ?? null;
+  if (targetEl) positionVersePopover(hoverEl, targetEl);
+  hoverEl.style.visibility = "";
+}
+
+/** Vertical gap between the link and the popover, and viewport edge margin. */
+const POPOVER_GAP_PX = 4;
+const POPOVER_VIEWPORT_MARGIN_PX = 8;
+
+/**
+ * Places `hoverEl` under (or above, when there's no room below) `targetEl`,
+ * left-aligned with it and clamped inside the viewport — mirroring Obsidian's
+ * native page-preview placement. The popover's max-height/scroll (from the
+ * theme) handles content taller than the viewport.
+ *
+ * We move the popover by the DELTA between its desired and current viewport
+ * position rather than assigning absolute coordinates, so this is independent
+ * of whatever container/coordinate basis Obsidian positioned it in.
+ */
+function positionVersePopover(hoverEl: HTMLElement, targetEl: HTMLElement): void {
+  const win = hoverEl.ownerDocument.defaultView ?? window;
+  const link = targetEl.getBoundingClientRect();
+  const pop = hoverEl.getBoundingClientRect();
+  if (pop.width === 0 && pop.height === 0) return;
+  const vw = win.innerWidth;
+  const vh = win.innerHeight;
+  const gap = POPOVER_GAP_PX;
+  const margin = POPOVER_VIEWPORT_MARGIN_PX;
+
+  // Horizontal: align with the link's left, shifting left to stay on-screen.
+  let left = link.left;
+  if (left + pop.width > vw - margin) left = vw - pop.width - margin;
+  if (left < margin) left = margin;
+
+  // Vertical: below by default; flip above when there's more room there, else
+  // clamp so the popover stays within the viewport.
+  let top = link.bottom + gap;
+  if (top + pop.height > vh - margin) {
+    const above = link.top - pop.height - gap;
+    const roomAbove = link.top;
+    const roomBelow = vh - link.bottom;
+    if (above >= margin && roomAbove > roomBelow) top = above;
+    else top = Math.max(margin, vh - pop.height - margin);
+  }
+
+  const curLeft = parseFloat(hoverEl.style.left || "") || 0;
+  const curTop = parseFloat(hoverEl.style.top || "") || 0;
+  hoverEl.style.left = `${curLeft + (left - pop.left)}px`;
+  hoverEl.style.top = `${curTop + (top - pop.top)}px`;
+}
+
+/**
+ * Wires verse anchors inside our popover. Unlike the document and native
+ * popovers (whose hovers Obsidian emits as `hover-link` itself), our popover
+ * lives outside the views Obsidian watches, so we re-emit `hover-link` on hover
+ * with THIS popover as the parent — the same `onLinkHover` path then opens the
+ * nested popover and Obsidian keeps the chain alive. Click navigates.
+ */
+function wirePopoverAnchors(
   plugin: VerseMarkersPlugin,
   contentEl: HTMLElement,
-  ownerNode: PopoverNode
-): Array<() => void> {
+  popover: VerseHoverPopover,
+  sourcePath: string
+): void {
   const allowShorthand = plugin.settings.enableShorthandSyntax;
   const anchors = collectVerseAnchors(contentEl, allowShorthand);
-  const disposers: Array<() => void> = [];
   for (const a of anchors) {
     const href = a.getAttribute("data-href") ?? a.getAttribute("href") ?? "";
     const hashIdx = href.indexOf("#");
@@ -679,23 +573,40 @@ function wirePopoverContent(
     const fragment = href.slice(hashIdx + 1);
 
     const onClick = (ev: MouseEvent): void => {
-      const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, "");
+      const file = plugin.app.metadataCache.getFirstLinkpathDest(
+        filePart,
+        sourcePath
+      );
       if (!(file instanceof TFile)) return;
       ev.preventDefault();
-      hideRoot(ownerNode);
+      ev.stopPropagation();
+      hidePopover(popover);
       void resolveVerseLink(plugin.app, file, fragment, allowShorthand);
     };
+    const onOver = (ev: MouseEvent): void => {
+      // Open the nested popover DIRECTLY, parented to THIS popover. We don't
+      // route through the page-preview `hover-link` event here: that path is
+      // modifier-gated by Page-preview's per-source settings, so in a view
+      // where preview-on-hover needs no modifier the nested hover gets
+      // suppressed and the chain never grows past one level. Calling
+      // openVersePopover ourselves bypasses that gating entirely.
+      //
+      // stopPropagation keeps Obsidian's own document-level page-preview
+      // handler from ALSO firing for this link (in no-modifier views) and
+      // opening a competing popover parented to the underlying VIEW — which,
+      // since a HoverParent keeps at most one child, would evict THIS popover.
+      // (It doesn't affect the popover's window-level mousemove keep-alive.)
+      ev.stopPropagation();
+      openVersePopover(plugin, popover, a, href, sourcePath);
+    };
     a.addEventListener("click", onClick);
-    disposers.push(() => a.removeEventListener("click", onClick));
-
-    const dispose = attachVerseHoverPreview(plugin, a as HTMLElement, href);
-    disposers.push(dispose);
+    a.addEventListener("mouseover", onOver);
+    popover.register(() => {
+      a.removeEventListener("click", onClick);
+      a.removeEventListener("mouseover", onOver);
+    });
   }
-  return disposers;
 }
-
-/** @deprecated use attachVerseHoverPreview. Kept temporarily for back-compat. */
-export const attachRangeHoverPreview = attachVerseHoverPreview;
 
 /**
  * Resolves a verse fragment navigation click: opens the file and scrolls

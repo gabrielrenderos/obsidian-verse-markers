@@ -23,13 +23,22 @@ const SKIP_TAGS = new Set([
   "TABLE", "IMG",
 ]);
 
-/** CSS classes that indicate skippable containers. */
-const SKIP_CLASSES = [".math", ".internal-embed", ".external-embed"];
+/** CSS classes that always indicate skippable containers. */
+const SKIP_CLASSES = [".math"];
+
+/**
+ * Embed containers. The page-level post-processor skips these (Obsidian renders
+ * embeds through their own pass), but our own verse embeds DO want their markers
+ * styled — see `styleVerseMarkers`.
+ */
+const EMBED_SKIP_CLASSES = [".internal-embed", ".external-embed"];
 
 /**
  * Returns true if the given node has an ancestor that should be skipped.
+ * When `skipEmbeds` is false, content inside an embed container is NOT skipped
+ * (used when we render verse content inside our own embed card).
  */
-function isInsideSkipped(node: Node): boolean {
+function isInsideSkipped(node: Node, skipEmbeds = true): boolean {
   let current: Node | null = node.parentNode;
   while (current !== null) {
     if (current.nodeType === Node.ELEMENT_NODE) {
@@ -37,6 +46,11 @@ function isInsideSkipped(node: Node): boolean {
       if (SKIP_TAGS.has(el.tagName)) return true;
       for (const cls of SKIP_CLASSES) {
         if (el.matches(cls)) return true;
+      }
+      if (skipEmbeds) {
+        for (const cls of EMBED_SKIP_CLASSES) {
+          if (el.matches(cls)) return true;
+        }
       }
     }
     current = current.parentNode;
@@ -102,17 +116,33 @@ function processTextNode(textNode: Text): boolean {
  * Collects all Text nodes within el that are not inside a skipped ancestor.
  * Collect into an array first to avoid live NodeList mutation issues.
  */
-function collectTextNodes(el: HTMLElement): Text[] {
+function collectTextNodes(el: HTMLElement, skipEmbeds = true): Text[] {
   const result: Text[] = [];
   const walker = activeDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT);
   let node: Node | null;
   while ((node = walker.nextNode()) !== null) {
     const textNode = node as Text;
-    if (!isInsideSkipped(textNode)) {
+    if (!isInsideSkipped(textNode, skipEmbeds)) {
       result.push(textNode);
     }
   }
   return result;
+}
+
+/**
+ * Styles verse markers within `el`, INCLUDING content inside an embed container.
+ *
+ * The page-level post-processor (`versePostProcessor`) deliberately skips
+ * `.internal-embed`, because Obsidian renders normal embeds through their own
+ * pass. Our verse embeds, however, render their content themselves and DO want
+ * the `[N]` markers styled — so this variant doesn't skip embed containers.
+ * Code/math and the hard tags are still skipped.
+ */
+export function styleVerseMarkers(el: HTMLElement): void {
+  const textNodes = collectTextNodes(el, false);
+  for (const tn of textNodes) {
+    processTextNode(tn);
+  }
 }
 
 /**

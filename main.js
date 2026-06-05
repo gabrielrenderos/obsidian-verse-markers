@@ -398,8 +398,9 @@ var SKIP_TAGS = /* @__PURE__ */ new Set([
   "TABLE",
   "IMG"
 ]);
-var SKIP_CLASSES = [".math", ".internal-embed", ".external-embed"];
-function isInsideSkipped(node) {
+var SKIP_CLASSES = [".math"];
+var EMBED_SKIP_CLASSES = [".internal-embed", ".external-embed"];
+function isInsideSkipped(node, skipEmbeds = true) {
   let current = node.parentNode;
   while (current !== null) {
     if (current.nodeType === Node.ELEMENT_NODE) {
@@ -409,6 +410,12 @@ function isInsideSkipped(node) {
       for (const cls of SKIP_CLASSES) {
         if (el.matches(cls))
           return true;
+      }
+      if (skipEmbeds) {
+        for (const cls of EMBED_SKIP_CLASSES) {
+          if (el.matches(cls))
+            return true;
+        }
       }
     }
     current = current.parentNode;
@@ -453,17 +460,23 @@ function processTextNode(textNode) {
   parent.replaceChild(fragment, textNode);
   return true;
 }
-function collectTextNodes(el) {
+function collectTextNodes(el, skipEmbeds = true) {
   const result = [];
   const walker = activeDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT);
   let node;
   while ((node = walker.nextNode()) !== null) {
     const textNode = node;
-    if (!isInsideSkipped(textNode)) {
+    if (!isInsideSkipped(textNode, skipEmbeds)) {
       result.push(textNode);
     }
   }
   return result;
+}
+function styleVerseMarkers(el) {
+  const textNodes = collectTextNodes(el, false);
+  for (const tn of textNodes) {
+    processTextNode(tn);
+  }
 }
 function collectVerseAnchors(el, allowShorthand = false) {
   var _a, _b;
@@ -611,27 +624,6 @@ function registerCommands(plugin) {
 
 // src/references.ts
 var import_obsidian2 = require("obsidian");
-var MAX_POPOVER_DEPTH = 16;
-var popoverNodes = /* @__PURE__ */ new WeakMap();
-function findEnclosingPopoverNode(node) {
-  let cur = node;
-  while (cur) {
-    if (cur.nodeType === Node.ELEMENT_NODE && cur.classList.contains("verse-hover-preview")) {
-      const found = popoverNodes.get(cur);
-      if (found)
-        return found;
-    }
-    cur = cur.parentNode;
-  }
-  return null;
-}
-function cancelHideUpChain(node) {
-  let cur = node;
-  while (cur) {
-    cur.cancelHide();
-    cur = cur.parent;
-  }
-}
 function partToIndex2(part) {
   return part.charCodeAt(0) - "a".charCodeAt(0);
 }
@@ -736,210 +728,179 @@ async function buildSegmentsPreviewMarkdown(app, file, segments, maxVerses) {
     return null;
   return appendMissingFootnoteDefinitions(blocks.join("\n\n"), content);
 }
-var HIDE_DELAY_MS = 200;
-var POPOVER_GAP_PX = 4;
-var VIEWPORT_MARGIN_PX = 8;
-function positionPopover(popover, anchor) {
-  const linkRect = anchor.getBoundingClientRect();
-  const popRect = popover.getBoundingClientRect();
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  let left = linkRect.left + window.scrollX;
-  let top = linkRect.bottom + window.scrollY + POPOVER_GAP_PX;
-  const popWidth = popRect.width || 0;
-  if (popWidth > 0 && left + popWidth > window.scrollX + vw - VIEWPORT_MARGIN_PX) {
-    left = window.scrollX + vw - popWidth - VIEWPORT_MARGIN_PX;
-    if (left < window.scrollX + VIEWPORT_MARGIN_PX) {
-      left = window.scrollX + VIEWPORT_MARGIN_PX;
-    }
-  }
-  const popHeight = popRect.height || 0;
-  if (popHeight > 0 && top + popHeight > window.scrollY + vh - VIEWPORT_MARGIN_PX) {
-    const aboveTop = linkRect.top + window.scrollY - popHeight - POPOVER_GAP_PX;
-    const spaceBelow = vh - linkRect.bottom;
-    const spaceAbove = linkRect.top;
-    if (spaceAbove > spaceBelow && aboveTop >= window.scrollY + VIEWPORT_MARGIN_PX) {
-      top = aboveTop;
-    }
-  }
-  popover.style.left = `${left}px`;
-  popover.style.top = `${top}px`;
+function getPagePreviewInstance(app) {
+  var _a, _b, _c;
+  const internal = app.internalPlugins;
+  const plugin = (_c = (_a = internal == null ? void 0 : internal.getPluginById) == null ? void 0 : _a.call(internal, "page-preview")) != null ? _c : (_b = internal == null ? void 0 : internal.plugins) == null ? void 0 : _b["page-preview"];
+  const instance = plugin == null ? void 0 : plugin.instance;
+  if (!instance || typeof instance.onLinkHover !== "function")
+    return null;
+  return instance;
 }
-function attachVerseHoverPreview(plugin, anchorEl, linkText) {
-  let node = null;
-  let popoverComponent = null;
-  let hideTimer = null;
-  let showToken = 0;
-  const cancelHide = () => {
-    if (hideTimer !== null) {
-      window.clearTimeout(hideTimer);
-      hideTimer = null;
-    }
-  };
-  const scheduleHide = () => {
-    cancelHide();
-    if (node && node.children.size > 0)
+function verseFragmentOf(linktext, allowShorthand) {
+  const hashIndex = linktext.indexOf("#");
+  if (hashIndex === -1)
+    return null;
+  const fragment = linktext.slice(hashIndex + 1);
+  return parseVerseSegments(fragment, allowShorthand) ? fragment : null;
+}
+function registerVersePagePreview(plugin) {
+  try {
+    const instance = getPagePreviewInstance(plugin.app);
+    if (!instance)
       return;
-    hideTimer = window.setTimeout(hide, HIDE_DELAY_MS);
-  };
-  const hide = () => {
-    cancelHide();
-    showToken++;
-    if (node) {
-      const children = Array.from(node.children);
-      for (const c of children)
-        c.hide();
-    }
-    if (popoverComponent) {
-      popoverComponent.unload();
-      popoverComponent = null;
-    }
-    if (node) {
-      if (node.el.parentNode)
-        node.el.parentNode.removeChild(node.el);
-      popoverNodes.delete(node.el);
-      const parent = node.parent;
-      if (parent) {
-        parent.children.delete(node);
-        if (!parent.hovered)
-          parent.scheduleHide();
+    const original = instance.onLinkHover.bind(instance);
+    const wrapped = (hoverParent, targetEl, linktext, sourcePath, ...rest) => {
+      try {
+        if (verseFragmentOf(linktext, plugin.settings.enableShorthandSyntax)) {
+          if (plugin.settings.enableHoverPreviews) {
+            openVersePopover(
+              plugin,
+              hoverParent,
+              targetEl,
+              linktext,
+              sourcePath != null ? sourcePath : ""
+            );
+          }
+          return;
+        }
+      } catch (e) {
       }
-      node = null;
-    }
-  };
-  const show = async (ev) => {
-    cancelHide();
-    if (!plugin.settings.enableHoverPreviews)
-      return;
-    if (node)
-      return;
-    const hashIndex = linkText.indexOf("#");
-    if (hashIndex === -1)
-      return;
-    const filePart = linkText.slice(0, hashIndex);
-    const fragment = linkText.slice(hashIndex + 1);
-    const allowShorthand = plugin.settings.enableShorthandSyntax;
-    const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, "");
-    if (!(file instanceof import_obsidian2.TFile))
-      return;
-    const parentNode = findEnclosingPopoverNode(anchorEl);
-    if (parentNode && parentNode.depth >= MAX_POPOVER_DEPTH - 1)
-      return;
-    const myToken = ++showToken;
-    let markdown = null;
-    const segments = parseVerseSegments(fragment, allowShorthand);
-    if (segments) {
-      markdown = await buildSegmentsPreviewMarkdown(
-        plugin.app,
-        file,
-        segments,
-        plugin.settings.hoverPreviewMaxVerses
-      );
-    }
-    if (myToken !== showToken)
-      return;
-    if (!markdown)
-      return;
-    const el = activeDocument.createElement("div");
-    el.className = "popover hover-popover verse-hover-preview";
-    const newNode = {
-      el,
-      parent: parentNode,
-      children: /* @__PURE__ */ new Set(),
-      depth: parentNode ? parentNode.depth + 1 : 0,
-      hovered: false,
-      cancelHide,
-      scheduleHide,
-      hide
+      return original(hoverParent, targetEl, linktext, sourcePath, ...rest);
     };
-    el.addEventListener("mouseenter", () => {
-      newNode.hovered = true;
-      cancelHideUpChain(newNode);
+    instance.onLinkHover = wrapped;
+    plugin.register(() => {
+      if (instance.onLinkHover === wrapped)
+        instance.onLinkHover = original;
     });
-    el.addEventListener("mouseleave", () => {
-      newNode.hovered = false;
-      scheduleHide();
-    });
-    const embed = activeDocument.createElement("div");
-    embed.className = "markdown-embed is-loaded";
-    el.appendChild(embed);
-    const contentEl = activeDocument.createElement("div");
-    contentEl.className = "markdown-embed-content";
-    embed.appendChild(contentEl);
-    const previewEl = activeDocument.createElement("div");
-    previewEl.className = "markdown-preview-view markdown-rendered";
-    contentEl.appendChild(previewEl);
-    const openLink = activeDocument.createElement("a");
-    openLink.className = "markdown-embed-link";
-    openLink.setAttribute("aria-label", "Open link");
-    (0, import_obsidian2.setIcon)(openLink, "lucide-move-diagonal-2");
-    openLink.addEventListener("click", (clickEv) => {
-      clickEv.preventDefault();
-      clickEv.stopPropagation();
-      hideRoot(newNode);
-      void resolveVerseLink(plugin.app, file, fragment, allowShorthand);
-    });
-    embed.appendChild(openLink);
-    positionPopover(el, anchorEl);
-    activeDocument.body.appendChild(el);
-    if (parentNode) {
-      parentNode.children.add(newNode);
-      cancelHideUpChain(parentNode);
-    }
-    popoverNodes.set(el, newNode);
-    const component = new import_obsidian2.Component();
-    component.load();
-    await import_obsidian2.MarkdownRenderer.render(plugin.app, markdown, previewEl, file.path, component);
-    positionPopover(el, anchorEl);
-    if (myToken !== showToken) {
-      component.unload();
-      if (parentNode)
-        parentNode.children.delete(newNode);
-      popoverNodes.delete(el);
-      if (el.parentNode)
-        el.parentNode.removeChild(el);
-      return;
-    }
-    const innerDisposers = wirePopoverContent(plugin, previewEl, newNode);
-    component.register(() => {
-      for (const d of innerDisposers)
-        d();
-    });
-    node = newNode;
-    popoverComponent = component;
-  };
-  const suppressNative = (ev) => {
+  } catch (e) {
+  }
+}
+function openVersePopover(plugin, hoverParent, targetEl, linktext, sourcePath) {
+  const allowShorthand = plugin.settings.enableShorthandSyntax;
+  const hashIndex = linktext.indexOf("#");
+  if (hashIndex === -1)
+    return;
+  const filePart = linktext.slice(0, hashIndex);
+  const fragment = linktext.slice(hashIndex + 1);
+  const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, sourcePath);
+  if (!(file instanceof import_obsidian2.TFile))
+    return;
+  const current = hoverParent.hoverPopover;
+  if (current && current.__verseTargetEl === targetEl)
+    return;
+  const popover = new import_obsidian2.HoverPopover(hoverParent, targetEl);
+  popover.__verseTargetEl = targetEl;
+  popover.hoverPopover = null;
+  popover.hoverEl.addClass("verse-hover-preview");
+  popover.hoverEl.style.visibility = "hidden";
+  let alive = true;
+  popover.register(() => {
+    alive = false;
+  });
+  void renderVersePopover(
+    plugin,
+    popover,
+    () => alive,
+    file,
+    fragment,
+    sourcePath,
+    allowShorthand
+  );
+}
+function hidePopover(popover) {
+  const h = popover;
+  if (typeof h.hide === "function")
+    h.hide();
+  else
+    popover.unload();
+}
+async function renderVersePopover(plugin, popover, isAlive, file, fragment, sourcePath, allowShorthand) {
+  var _a, _b;
+  const segments = parseVerseSegments(fragment, allowShorthand);
+  if (!segments)
+    return;
+  const markdown = await buildSegmentsPreviewMarkdown(
+    plugin.app,
+    file,
+    segments,
+    plugin.settings.hoverPreviewMaxVerses
+  );
+  if (!isAlive() || !markdown)
+    return;
+  const hoverEl = popover.hoverEl;
+  const win = (_a = hoverEl.ownerDocument.defaultView) != null ? _a : window;
+  let frames = 0;
+  while (!hoverEl.isConnected && isAlive() && frames++ < 60) {
+    await new Promise(
+      (resolve) => win.requestAnimationFrame(() => resolve())
+    );
+  }
+  if (!isAlive())
+    return;
+  hoverEl.empty();
+  const embed = hoverEl.createDiv({ cls: "markdown-embed is-loaded" });
+  const content = embed.createDiv({ cls: "markdown-embed-content" });
+  const preview = content.createDiv({
+    cls: "markdown-preview-view markdown-rendered"
+  });
+  await import_obsidian2.MarkdownRenderer.render(plugin.app, markdown, preview, file.path, popover);
+  if (!isAlive())
+    return;
+  const openLink = embed.createEl("a", {
+    cls: "markdown-embed-link",
+    attr: { "aria-label": "Open link" }
+  });
+  (0, import_obsidian2.setIcon)(openLink, "lucide-maximize-2");
+  openLink.addEventListener("click", (ev) => {
+    ev.preventDefault();
     ev.stopPropagation();
-  };
-  const onClickHide = () => hide();
-  const onAnchorEnter = (ev) => {
-    const enclosing = findEnclosingPopoverNode(anchorEl);
-    cancelHideUpChain(enclosing);
-    void show(ev);
-  };
-  anchorEl.addEventListener("mouseover", suppressNative);
-  anchorEl.addEventListener("mouseenter", onAnchorEnter);
-  anchorEl.addEventListener("mouseleave", scheduleHide);
-  anchorEl.addEventListener("click", onClickHide);
-  return () => {
-    anchorEl.removeEventListener("mouseover", suppressNative);
-    anchorEl.removeEventListener("mouseenter", onAnchorEnter);
-    anchorEl.removeEventListener("mouseleave", scheduleHide);
-    anchorEl.removeEventListener("click", onClickHide);
-    hide();
-  };
+    hidePopover(popover);
+    void resolveVerseLink(plugin.app, file, fragment, allowShorthand);
+  });
+  wirePopoverAnchors(plugin, preview, popover, sourcePath);
+  const targetEl = (_b = popover.__verseTargetEl) != null ? _b : null;
+  if (targetEl)
+    positionVersePopover(hoverEl, targetEl);
+  hoverEl.style.visibility = "";
 }
-function hideRoot(node) {
-  let cur = node;
-  while (cur.parent)
-    cur = cur.parent;
-  cur.hide();
+var POPOVER_GAP_PX = 4;
+var POPOVER_VIEWPORT_MARGIN_PX = 8;
+function positionVersePopover(hoverEl, targetEl) {
+  var _a;
+  const win = (_a = hoverEl.ownerDocument.defaultView) != null ? _a : window;
+  const link = targetEl.getBoundingClientRect();
+  const pop = hoverEl.getBoundingClientRect();
+  if (pop.width === 0 && pop.height === 0)
+    return;
+  const vw = win.innerWidth;
+  const vh = win.innerHeight;
+  const gap = POPOVER_GAP_PX;
+  const margin = POPOVER_VIEWPORT_MARGIN_PX;
+  let left = link.left;
+  if (left + pop.width > vw - margin)
+    left = vw - pop.width - margin;
+  if (left < margin)
+    left = margin;
+  let top = link.bottom + gap;
+  if (top + pop.height > vh - margin) {
+    const above = link.top - pop.height - gap;
+    const roomAbove = link.top;
+    const roomBelow = vh - link.bottom;
+    if (above >= margin && roomAbove > roomBelow)
+      top = above;
+    else
+      top = Math.max(margin, vh - pop.height - margin);
+  }
+  const curLeft = parseFloat(hoverEl.style.left || "") || 0;
+  const curTop = parseFloat(hoverEl.style.top || "") || 0;
+  hoverEl.style.left = `${curLeft + (left - pop.left)}px`;
+  hoverEl.style.top = `${curTop + (top - pop.top)}px`;
 }
-function wirePopoverContent(plugin, contentEl, ownerNode) {
+function wirePopoverAnchors(plugin, contentEl, popover, sourcePath) {
   var _a, _b;
   const allowShorthand = plugin.settings.enableShorthandSyntax;
   const anchors = collectVerseAnchors(contentEl, allowShorthand);
-  const disposers = [];
   for (const a of anchors) {
     const href = (_b = (_a = a.getAttribute("data-href")) != null ? _a : a.getAttribute("href")) != null ? _b : "";
     const hashIdx = href.indexOf("#");
@@ -948,19 +909,28 @@ function wirePopoverContent(plugin, contentEl, ownerNode) {
     const filePart = href.slice(0, hashIdx);
     const fragment = href.slice(hashIdx + 1);
     const onClick = (ev) => {
-      const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, "");
+      const file = plugin.app.metadataCache.getFirstLinkpathDest(
+        filePart,
+        sourcePath
+      );
       if (!(file instanceof import_obsidian2.TFile))
         return;
       ev.preventDefault();
-      hideRoot(ownerNode);
+      ev.stopPropagation();
+      hidePopover(popover);
       void resolveVerseLink(plugin.app, file, fragment, allowShorthand);
     };
+    const onOver = (ev) => {
+      ev.stopPropagation();
+      openVersePopover(plugin, popover, a, href, sourcePath);
+    };
     a.addEventListener("click", onClick);
-    disposers.push(() => a.removeEventListener("click", onClick));
-    const dispose = attachVerseHoverPreview(plugin, a, href);
-    disposers.push(dispose);
+    a.addEventListener("mouseover", onOver);
+    popover.register(() => {
+      a.removeEventListener("click", onClick);
+      a.removeEventListener("mouseover", onOver);
+    });
   }
-  return disposers;
 }
 async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
   var _a, _b;
@@ -1359,9 +1329,9 @@ var VerseEmbed = class extends import_obsidian3.Component {
       return;
     }
     const content = container.createDiv({ cls: "markdown-embed-content" });
-    const doc = container.ownerDocument;
-    const preview = doc.createElement("div");
-    preview.className = "markdown-rendered verse-embed-preview";
+    const preview = content.createDiv({
+      cls: "markdown-rendered verse-embed-preview"
+    });
     await import_obsidian3.MarkdownRenderer.render(
       this.plugin.app,
       markdown,
@@ -1371,8 +1341,8 @@ var VerseEmbed = class extends import_obsidian3.Component {
     );
     if (myToken !== this.renderToken)
       return;
+    styleVerseMarkers(preview);
     wrapAsDocumentBlocks(preview);
-    content.appendChild(preview);
     const link = container.createEl("a", {
       cls: "markdown-embed-link",
       attr: { "aria-label": "Open link" }
@@ -1486,6 +1456,7 @@ var VerseMarkersPlugin = class extends import_obsidian5.Plugin {
       versePostProcessor(el, ctx);
       this.wireVerseAnchors(el);
     });
+    registerVersePagePreview(this);
     registerVerseEmbeds(this);
     registerCommands(this);
     this.registerObsidianProtocolHandler("verse-markers", async (params) => {
@@ -1518,12 +1489,14 @@ var VerseMarkersPlugin = class extends import_obsidian5.Plugin {
     await this.saveData(this.settings);
   }
   /**
-   * For each rendered anchor whose fragment is verse-N or verse-N:M, attach
-   * a click handler that invokes our verse-aware navigator, and (for ranges)
-   * a mouse-hover preview listener.
+   * For each rendered anchor whose fragment is verse-N or verse-N:M, attach a
+   * click handler that invokes our verse-aware navigator. Hover previews are
+   * handled separately by the page-preview hook (registerVersePagePreview).
    */
   wireVerseAnchors(el) {
     var _a, _b;
+    if (el.closest(".verse-hover-preview"))
+      return;
     const allowShorthand = this.settings.enableShorthandSyntax;
     const anchors = collectVerseAnchors(el, allowShorthand);
     for (const a of anchors) {
@@ -1543,8 +1516,6 @@ var VerseMarkersPlugin = class extends import_obsidian5.Plugin {
       };
       a.addEventListener("click", onClick);
       this.hoverDisposers.push(() => a.removeEventListener("click", onClick));
-      const dispose = attachVerseHoverPreview(this, a, href);
-      this.hoverDisposers.push(dispose);
     }
   }
 };

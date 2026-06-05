@@ -25,6 +25,7 @@
 import { App, Component, MarkdownRenderer, TFile, setIcon } from "obsidian";
 import { parseVerseSegments } from "./detection";
 import { buildSegmentsPreviewMarkdown, resolveVerseLink } from "./references";
+import { styleVerseMarkers } from "./postprocessor";
 import type VerseMarkersPlugin from "./main";
 
 /** Minimal shape of the context Obsidian passes to an embed creator. */
@@ -149,19 +150,20 @@ class VerseEmbed extends Component {
 
     const content = container.createDiv({ cls: "markdown-embed-content" });
 
-    // Render into a DETACHED element first. Our reading-view post-processor
-    // skips anything inside `.internal-embed` (which this container is), so if
-    // we rendered straight into the card the [N] markers would stay as raw
-    // "[6]" text. Rendering detached lets the post-processor style + strip
-    // them; we attach the finished, styled content afterwards.
+    // Render ATTACHED, straight into the card. We previously rendered into a
+    // detached element so the page post-processor would style the [N] markers
+    // (it skips `.internal-embed`), but detached rendering breaks footnotes:
+    // their refs/definitions and click-to-scroll only wire up correctly inside
+    // the live document tree. So we render attached (footnotes work, exactly
+    // like the hover popover) and style the markers ourselves below.
     // NOTE: only `markdown-rendered` here — deliberately NOT
     // `markdown-preview-view`. That class is the full document-pane preview
     // class, and Obsidian gives it context-dependent horizontal padding that
     // differs between reading view and Live Preview (the source of the uneven
     // left gap). `markdown-rendered` alone styles the content the same in both.
-    const doc = container.ownerDocument;
-    const preview = doc.createElement("div");
-    preview.className = "markdown-rendered verse-embed-preview";
+    const preview = content.createDiv({
+      cls: "markdown-rendered verse-embed-preview",
+    });
     await MarkdownRenderer.render(
       this.plugin.app,
       markdown,
@@ -171,14 +173,18 @@ class VerseEmbed extends Component {
     );
     if (myToken !== this.renderToken) return;
 
+    // The page post-processor skipped the [N] markers here (this card is an
+    // `.internal-embed`), so style them ourselves — this variant doesn't skip
+    // embed containers. Verse-link hovers are still wired by the page
+    // post-processor's anchor pass, which DOES run inside embeds.
+    styleVerseMarkers(preview);
+
     // Match the document's reading-view structure: Obsidian wraps every
     // top-level block in a `div.el-<tag>` (.el-blockquote, .el-h3, .el-p, …)
     // which is what carries its block spacing. MarkdownRenderer.render doesn't
     // add those wrappers, so we add them ourselves — making blockquotes,
     // headings, paragraphs, lists, etc. lay out exactly like the live note.
     wrapAsDocumentBlocks(preview);
-
-    content.appendChild(preview);
 
     // Corner "open" affordance, mirroring Obsidian's native embed chrome.
     const link = container.createEl("a", {
