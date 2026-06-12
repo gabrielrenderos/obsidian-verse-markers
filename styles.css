@@ -21,7 +21,7 @@
   color: var(--link-color);
 }
 
-/* Live Preview: `[//]` breaks — same bracket/label treatment as native `[N]`. */
+/* Live Preview: `[//]` brackets outside ==highlight== (inside, only `//` is accented). */
 .markdown-source-view.mod-cm6 .verse-marker-bracket {
   color: var(--text-faint);
 }

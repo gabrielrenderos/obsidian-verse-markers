@@ -3,8 +3,9 @@
 
 /**
  * livePreview.ts
- * Live Preview accents for verse markers inside ==highlight== (digits only) and
- * for `[//]` breaks everywhere (muted brackets + accent `//`, like `[N]`).
+ * Live Preview accents for verse markers and `[//]` breaks inside ==highlight==
+ * (label / `//` only). Outside highlights, `[//]` also gets muted brackets
+ * because Obsidian does not style that token natively like `[N]`.
  */
 
 import {
@@ -57,11 +58,19 @@ function collectDecorations(view: EditorView): RangeDecorationSpec[] {
       if (markerIdx === -1 || (brIdx !== -1 && brIdx < markerIdx)) {
         const breakFrom = brIdx;
         const breakTo = brIdx + VERSE_BREAK_TOKEN.length;
-        specs.push(
-          { from: breakFrom, to: breakFrom + 1, className: "verse-marker-bracket" },
-          { from: breakFrom + 1, to: breakTo - 1, className: "verse-marker" },
-          { from: breakTo - 1, to: breakTo, className: "verse-marker-bracket" }
-        );
+        if (markerInsideHighlight(breakFrom, breakTo, highlights)) {
+          specs.push({
+            from: breakFrom + 1,
+            to: breakTo - 1,
+            className: "verse-marker",
+          });
+        } else {
+          specs.push(
+            { from: breakFrom, to: breakFrom + 1, className: "verse-marker-bracket" },
+            { from: breakFrom + 1, to: breakTo - 1, className: "verse-marker" },
+            { from: breakTo - 1, to: breakTo, className: "verse-marker-bracket" }
+          );
+        }
         pos = breakTo;
         continue;
       }

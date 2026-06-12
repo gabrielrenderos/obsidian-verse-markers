@@ -192,6 +192,55 @@ export function isVerseBreakLine(line: string): boolean {
   return /^\s*(?:>\s?)*\[\/\/\]\s*$/.test(line);
 }
 
+/** Reading-view / flash state after `[N]` and `[//]` tokens in source order. */
+export interface VerseProcessState {
+  inVerseSpan: boolean;
+  inVerseMode: boolean;
+}
+
+/** Character offset at the start of `lineIndex` (0-based) in `text`. */
+export function charOffsetForLine(text: string, lineIndex: number): number {
+  if (lineIndex <= 0) return 0;
+  let line = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (line === lineIndex) return i;
+    if (text[i] === "\n") line++;
+  }
+  return text.length;
+}
+
+/**
+ * Verse/editorial toggle state in `text` immediately before `endOffset`, by
+ * scanning `[N]` markers and `[//]` breaks from the start of the file.
+ */
+export function verseProcessStateAt(
+  text: string,
+  endOffset: number
+): VerseProcessState {
+  const state: VerseProcessState = { inVerseSpan: false, inVerseMode: true };
+  let pos = 0;
+  const limit = Math.min(endOffset, text.length);
+  while (pos < limit) {
+    const slice = text.slice(pos, limit);
+    const brRel = findVerseBreakIndex(slice);
+    const brIdx = brRel === -1 ? -1 : pos + brRel;
+    const m = execVerseMarker(getVerseRegex(), slice);
+    const markerIdx = m ? pos + m.index : -1;
+
+    if (brIdx === -1 && markerIdx === -1) break;
+
+    if (markerIdx === -1 || (brIdx !== -1 && brIdx < markerIdx)) {
+      if (state.inVerseSpan) state.inVerseMode = !state.inVerseMode;
+      pos = brIdx + VERSE_BREAK_TOKEN.length;
+    } else {
+      state.inVerseSpan = true;
+      state.inVerseMode = true;
+      pos = markerIdx + m![0].length;
+    }
+  }
+  return state;
+}
+
 /** Strips one level of leading "> " blockquote marker from a line. */
 function stripBlockquoteMarker(line: string): string {
   return line.replace(/^\s*>\s?/, "");

@@ -1109,6 +1109,8 @@ function wrapRangeWithSpans(range: Range, className: string): HTMLSpanElement[] 
     // but their own label text is section structure, not verse body.
     const owner = t.parentElement;
     if (owner && owner.closest("h1, h2, h3, h4, h5, h6")) continue;
+    // Skip `[//]` editorial gaps (wrapped by the reading-view post-processor).
+    if (owner && owner.closest(".verse-editorial")) continue;
     // Skip whitespace-only text nodes (typically structural newlines/indent
     // sitting between block elements — e.g. between <blockquote> and its
     // child <p>s). With padding applied, a wrapped whitespace node would

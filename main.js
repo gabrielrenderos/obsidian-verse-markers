@@ -110,6 +110,42 @@ function findVerseBreakIndex(text, from = 0) {
 function isVerseBreakLine(line) {
   return /^\s*(?:>\s?)*\[\/\/\]\s*$/.test(line);
 }
+function charOffsetForLine(text, lineIndex) {
+  if (lineIndex <= 0)
+    return 0;
+  let line = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (line === lineIndex)
+      return i;
+    if (text[i] === "\n")
+      line++;
+  }
+  return text.length;
+}
+function verseProcessStateAt(text, endOffset) {
+  const state = { inVerseSpan: false, inVerseMode: true };
+  let pos = 0;
+  const limit = Math.min(endOffset, text.length);
+  while (pos < limit) {
+    const slice = text.slice(pos, limit);
+    const brRel = findVerseBreakIndex(slice);
+    const brIdx = brRel === -1 ? -1 : pos + brRel;
+    const m = execVerseMarker(getVerseRegex(), slice);
+    const markerIdx = m ? pos + m.index : -1;
+    if (brIdx === -1 && markerIdx === -1)
+      break;
+    if (markerIdx === -1 || brIdx !== -1 && brIdx < markerIdx) {
+      if (state.inVerseSpan)
+        state.inVerseMode = !state.inVerseMode;
+      pos = brIdx + VERSE_BREAK_TOKEN.length;
+    } else {
+      state.inVerseSpan = true;
+      state.inVerseMode = true;
+      pos = markerIdx + m[0].length;
+    }
+  }
+  return state;
+}
 function stripBlockquoteMarker(line) {
   return line.replace(/^\s*>\s?/, "");
 }
@@ -558,6 +594,18 @@ function isInsideSkipped(node, skipEmbeds = true) {
   }
   return false;
 }
+function appendVerseText(fragment, text, state) {
+  if (text.length === 0)
+    return;
+  if (state.inVerseSpan && !state.inVerseMode) {
+    const span = activeDocument.createElement("span");
+    span.className = "verse-editorial";
+    span.appendChild(activeDocument.createTextNode(text));
+    fragment.appendChild(span);
+    return;
+  }
+  fragment.appendChild(activeDocument.createTextNode(text));
+}
 function appendVerseMarker(fragment, token) {
   const { number, part } = parseMarkerToken(token);
   const label = `${number}${part != null ? part : ""}`;
@@ -580,14 +628,25 @@ function nextInlineToken(text, from) {
   }
   return { index: markerIdx, length: m[0].length, kind: "marker", token: m[0] };
 }
-function processTextNode(textNode) {
-  var _a;
-  const text = (_a = textNode.nodeValue) != null ? _a : "";
-  if (nextInlineToken(text, 0) === null)
+function processTextNode(textNode, state) {
+  var _a, _b;
+  if ((_a = textNode.parentElement) == null ? void 0 : _a.closest(".verse-editorial, .verse-marker")) {
+    return false;
+  }
+  const text = (_b = textNode.nodeValue) != null ? _b : "";
+  const hasToken = nextInlineToken(text, 0) !== null;
+  if (!hasToken && !(state.inVerseSpan && !state.inVerseMode))
     return false;
   const parent = textNode.parentNode;
   if (!parent)
     return false;
+  if (!hasToken) {
+    const span = activeDocument.createElement("span");
+    span.className = "verse-editorial";
+    span.appendChild(activeDocument.createTextNode(text));
+    parent.replaceChild(span, textNode);
+    return true;
+  }
   const fragment = activeDocument.createDocumentFragment();
   let lastIndex = 0;
   let pos = 0;
@@ -596,21 +655,26 @@ function processTextNode(textNode) {
     if (!hit)
       break;
     if (hit.index > lastIndex) {
-      fragment.appendChild(
-        activeDocument.createTextNode(text.slice(lastIndex, hit.index))
-      );
+      appendVerseText(fragment, text.slice(lastIndex, hit.index), state);
     }
     if (hit.kind === "marker") {
       appendVerseMarker(fragment, hit.token);
+      state.inVerseSpan = true;
+      state.inVerseMode = true;
+    } else if (state.inVerseSpan) {
+      state.inVerseMode = !state.inVerseMode;
     }
     lastIndex = hit.index + hit.length;
     pos = lastIndex;
   }
   if (lastIndex < text.length) {
-    fragment.appendChild(activeDocument.createTextNode(text.slice(lastIndex)));
+    appendVerseText(fragment, text.slice(lastIndex), state);
   }
   parent.replaceChild(fragment, textNode);
   return true;
+}
+function isEditorialContinuationBlock(blockText, state) {
+  return state.inVerseSpan && !state.inVerseMode && !hasVerseMarker(blockText) && !isVerseBreakLine(blockText);
 }
 function collectTextNodes(el, skipEmbeds = true) {
   const result = [];
@@ -626,8 +690,9 @@ function collectTextNodes(el, skipEmbeds = true) {
 }
 function styleVerseMarkers(el) {
   const textNodes = collectTextNodes(el, false);
+  const state = { inVerseSpan: false, inVerseMode: true };
   for (const tn of textNodes) {
-    processTextNode(tn);
+    processTextNode(tn, state);
   }
 }
 function collectVerseAnchors(el, allowShorthand = false) {
@@ -679,9 +744,31 @@ function hideVerseBreakBlock(el, ctx) {
   el.setAttr("aria-hidden", "true");
 }
 function versePostProcessor(el, ctx) {
+  let state = { inVerseSpan: false, inVerseMode: true };
+  let blockText = "";
+  if (ctx) {
+    const info = ctx.getSectionInfo(el);
+    if (info) {
+      const lines = info.text.split("\n");
+      blockText = lines.slice(info.lineStart, info.lineEnd + 1).join("\n");
+      state = verseProcessStateAt(
+        info.text,
+        charOffsetForLine(info.text, info.lineStart)
+      );
+    }
+  }
+  if (isEditorialContinuationBlock(blockText, state)) {
+    el.addClass("verse-editorial");
+    if (ctx)
+      hideVerseBreakBlock(el, ctx);
+    const partId = ctx ? partAnchorForBlock(el, ctx) : null;
+    if (partId)
+      injectPartAnchor(el, partId);
+    return;
+  }
   const textNodes = collectTextNodes(el);
   for (const tn of textNodes) {
-    processTextNode(tn);
+    processTextNode(tn, state);
   }
   if (ctx) {
     hideVerseBreakBlock(el, ctx);
@@ -1471,6 +1558,8 @@ function wrapRangeWithSpans(range, className) {
     const owner = t.parentElement;
     if (owner && owner.closest("h1, h2, h3, h4, h5, h6"))
       continue;
+    if (owner && owner.closest(".verse-editorial"))
+      continue;
     if (!/\S/.test(t.nodeValue))
       continue;
     if (range.intersectsNode(t))
@@ -1742,11 +1831,19 @@ function collectDecorations(view) {
       if (markerIdx === -1 || brIdx !== -1 && brIdx < markerIdx) {
         const breakFrom = brIdx;
         const breakTo = brIdx + VERSE_BREAK_TOKEN.length;
-        specs.push(
-          { from: breakFrom, to: breakFrom + 1, className: "verse-marker-bracket" },
-          { from: breakFrom + 1, to: breakTo - 1, className: "verse-marker" },
-          { from: breakTo - 1, to: breakTo, className: "verse-marker-bracket" }
-        );
+        if (markerInsideHighlight(breakFrom, breakTo, highlights)) {
+          specs.push({
+            from: breakFrom + 1,
+            to: breakTo - 1,
+            className: "verse-marker"
+          });
+        } else {
+          specs.push(
+            { from: breakFrom, to: breakFrom + 1, className: "verse-marker-bracket" },
+            { from: breakFrom + 1, to: breakTo - 1, className: "verse-marker" },
+            { from: breakTo - 1, to: breakTo, className: "verse-marker-bracket" }
+          );
+        }
         pos = breakTo;
         continue;
       }

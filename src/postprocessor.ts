@@ -8,6 +8,7 @@
 
 import { MarkdownPostProcessorContext } from "obsidian";
 import {
+  charOffsetForLine,
   execVerseMarker,
   findVerseBreakIndex,
   getVerseRegex,
@@ -18,6 +19,8 @@ import {
   VERSE_BREAK_TOKEN,
   VERSE_FRAGMENT_TEST_STRICT,
   VERSE_FRAGMENT_TEST_LOOSE,
+  verseProcessStateAt,
+  type VerseProcessState,
 } from "./detection";
 
 /** Tags whose descendants must be skipped entirely. */
@@ -62,6 +65,26 @@ function isInsideSkipped(node: Node, skipEmbeds = true): boolean {
 }
 
 /**
+ * Appends plain text, wrapping editorial gaps in `.verse-editorial` so the
+ * navigation flash can skip them without re-parsing source offsets.
+ */
+function appendVerseText(
+  fragment: DocumentFragment,
+  text: string,
+  state: VerseProcessState
+): void {
+  if (text.length === 0) return;
+  if (state.inVerseSpan && !state.inVerseMode) {
+    const span = activeDocument.createElement("span");
+    span.className = "verse-editorial";
+    span.appendChild(activeDocument.createTextNode(text));
+    fragment.appendChild(span);
+    return;
+  }
+  fragment.appendChild(activeDocument.createTextNode(text));
+}
+
+/**
  * Appends a styled verse marker to `fragment` (brackets dropped — reading view).
  */
 function appendVerseMarker(fragment: DocumentFragment, token: string): void {
@@ -94,15 +117,28 @@ function nextInlineToken(text: string, from: number): InlineToken | null {
 }
 
 /**
- * Processes a single Text node: styles verse markers and removes `[//]` break
- * tokens (reading view). Editorial text after an inline break stays visible.
+ * Processes a single Text node: styles verse markers, removes `[//]` break
+ * tokens (reading view), and wraps editorial gaps in `.verse-editorial`.
+ * `state` carries the verse/editorial toggle across nodes in document order.
  */
-function processTextNode(textNode: Text): boolean {
+function processTextNode(textNode: Text, state: VerseProcessState): boolean {
+  if (textNode.parentElement?.closest(".verse-editorial, .verse-marker")) {
+    return false;
+  }
   const text = textNode.nodeValue ?? "";
-  if (nextInlineToken(text, 0) === null) return false;
+  const hasToken = nextInlineToken(text, 0) !== null;
+  if (!hasToken && !(state.inVerseSpan && !state.inVerseMode)) return false;
 
   const parent = textNode.parentNode;
   if (!parent) return false;
+
+  if (!hasToken) {
+    const span = activeDocument.createElement("span");
+    span.className = "verse-editorial";
+    span.appendChild(activeDocument.createTextNode(text));
+    parent.replaceChild(span, textNode);
+    return true;
+  }
 
   const fragment = activeDocument.createDocumentFragment();
   let lastIndex = 0;
@@ -113,26 +149,43 @@ function processTextNode(textNode: Text): boolean {
     if (!hit) break;
 
     if (hit.index > lastIndex) {
-      fragment.appendChild(
-        activeDocument.createTextNode(text.slice(lastIndex, hit.index))
-      );
+      appendVerseText(fragment, text.slice(lastIndex, hit.index), state);
     }
 
     if (hit.kind === "marker") {
       appendVerseMarker(fragment, hit.token);
+      state.inVerseSpan = true;
+      state.inVerseMode = true;
+    } else if (state.inVerseSpan) {
+      state.inVerseMode = !state.inVerseMode;
     }
-    // break: omit token from reading view (editorial text after it remains)
 
     lastIndex = hit.index + hit.length;
     pos = lastIndex;
   }
 
   if (lastIndex < text.length) {
-    fragment.appendChild(activeDocument.createTextNode(text.slice(lastIndex)));
+    appendVerseText(fragment, text.slice(lastIndex), state);
   }
 
   parent.replaceChild(fragment, textNode);
   return true;
+}
+
+/**
+ * True when `blockText` is editorial continuation after a `[//]` (no markers
+ * of its own) and `state` says we are inside an editorial gap.
+ */
+function isEditorialContinuationBlock(
+  blockText: string,
+  state: VerseProcessState
+): boolean {
+  return (
+    state.inVerseSpan &&
+    !state.inVerseMode &&
+    !hasVerseMarker(blockText) &&
+    !isVerseBreakLine(blockText)
+  );
 }
 
 /**
@@ -163,8 +216,9 @@ function collectTextNodes(el: HTMLElement, skipEmbeds = true): Text[] {
  */
 export function styleVerseMarkers(el: HTMLElement): void {
   const textNodes = collectTextNodes(el, false);
+  const state: VerseProcessState = { inVerseSpan: false, inVerseMode: true };
   for (const tn of textNodes) {
-    processTextNode(tn);
+    processTextNode(tn, state);
   }
 }
 
@@ -268,9 +322,32 @@ export function versePostProcessor(
   el: HTMLElement,
   ctx?: MarkdownPostProcessorContext
 ): void {
+  let state: VerseProcessState = { inVerseSpan: false, inVerseMode: true };
+  let blockText = "";
+
+  if (ctx) {
+    const info = ctx.getSectionInfo(el);
+    if (info) {
+      const lines = info.text.split("\n");
+      blockText = lines.slice(info.lineStart, info.lineEnd + 1).join("\n");
+      state = verseProcessStateAt(
+        info.text,
+        charOffsetForLine(info.text, info.lineStart)
+      );
+    }
+  }
+
+  if (isEditorialContinuationBlock(blockText, state)) {
+    el.addClass("verse-editorial");
+    if (ctx) hideVerseBreakBlock(el, ctx);
+    const partId = ctx ? partAnchorForBlock(el, ctx) : null;
+    if (partId) injectPartAnchor(el, partId);
+    return;
+  }
+
   const textNodes = collectTextNodes(el);
   for (const tn of textNodes) {
-    processTextNode(tn);
+    processTextNode(tn, state);
   }
 
   if (ctx) {
