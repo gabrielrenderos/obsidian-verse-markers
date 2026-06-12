@@ -35,10 +35,25 @@ var VERSE_MARKER_REGEX = /\[\d+[a-z]*\](?=\s|$)/gm;
 function getVerseRegex() {
   return new RegExp(VERSE_MARKER_REGEX.source, VERSE_MARKER_REGEX.flags);
 }
+var INLINE_FORMAT_DELIM = /=|[*~_]/;
 function atVerseBoundary(text, index) {
   if (index <= 0)
     return true;
-  const prev = text.charAt(index - 1);
+  let pos = index - 1;
+  while (pos >= 0) {
+    if (INLINE_FORMAT_DELIM.test(text.charAt(pos))) {
+      pos--;
+      continue;
+    }
+    if (text.charAt(pos) === "\\") {
+      pos--;
+      continue;
+    }
+    break;
+  }
+  if (pos < 0)
+    return true;
+  const prev = text.charAt(pos);
   return prev === ">" || /\s/.test(prev);
 }
 function execVerseMarker(re, text) {
@@ -77,8 +92,109 @@ function scanMarkers(text) {
   return hits;
 }
 var HEADING_LINE_REGEX = /^\s*#{1,6}\s+\S.*$/;
+var VERSE_BREAK_TOKEN = "[//]";
+function findVerseBreakIndex(text, from = 0) {
+  let pos = from;
+  while (pos < text.length) {
+    const idx = text.indexOf(VERSE_BREAK_TOKEN, pos);
+    if (idx === -1)
+      return -1;
+    if (idx > 0 && text[idx - 1] === "\\") {
+      pos = idx + VERSE_BREAK_TOKEN.length;
+      continue;
+    }
+    return idx;
+  }
+  return -1;
+}
+function isVerseBreakLine(line) {
+  return /^\s*(?:>\s?)*\[\/\/\]\s*$/.test(line);
+}
 function stripBlockquoteMarker(line) {
   return line.replace(/^\s*>\s?/, "");
+}
+function stripEditorialBreaks(raw) {
+  const parts = [];
+  let inVerse = true;
+  let pos = 0;
+  while (pos < raw.length) {
+    const br = findVerseBreakIndex(raw, pos);
+    if (br === -1) {
+      if (inVerse)
+        parts.push(raw.slice(pos));
+      break;
+    }
+    if (inVerse)
+      parts.push(raw.slice(pos, br));
+    inVerse = !inVerse;
+    pos = br + VERSE_BREAK_TOKEN.length;
+  }
+  return parts.join("");
+}
+function paragraphStartAt(text, offset) {
+  let lineStart = text.lastIndexOf("\n", offset - 1) + 1;
+  while (lineStart > 0) {
+    const prevLineEnd = lineStart - 1;
+    const prevLineStart = text.lastIndexOf("\n", prevLineEnd - 1) + 1;
+    const prevLine = text.slice(prevLineStart, prevLineEnd);
+    const stripped = stripBlockquoteMarker(prevLine);
+    if (/^\s*$/.test(stripped) || HEADING_LINE_REGEX.test(stripped))
+      break;
+    lineStart = prevLineStart;
+  }
+  return lineStart;
+}
+function highlightOpenAt(text, offset) {
+  const start = paragraphStartAt(text, offset);
+  let open = false;
+  let inInlineCode = false;
+  let inFence = false;
+  let i = start;
+  while (i < offset) {
+    if (text.slice(i, i + 3) === "```") {
+      if (!inInlineCode) {
+        inFence = !inFence;
+        i += 3;
+        continue;
+      }
+    }
+    if (!inFence) {
+      if (text[i] === "`") {
+        inInlineCode = !inInlineCode;
+        i++;
+        continue;
+      }
+      if (!inInlineCode && text.slice(i, i + 2) === "==") {
+        if (i > start && text[i - 1] === "\\") {
+          i += 2;
+          continue;
+        }
+        open = !open;
+        i += 2;
+        continue;
+      }
+    }
+    i++;
+  }
+  return open;
+}
+function prependHighlightOpener(slice) {
+  const nl = slice.indexOf("\n");
+  const firstLine = nl === -1 ? slice : slice.slice(0, nl);
+  const rest = nl === -1 ? "" : slice.slice(nl);
+  const lead = /^(\s*(?:>\s?)*)/.exec(firstLine);
+  const prefix = lead ? lead[1] : "";
+  return `${prefix}==${firstLine.slice(prefix.length)}${rest}`;
+}
+function balanceHighlights(slice, fullText, sliceStart, sliceEnd) {
+  let result = slice;
+  if (highlightOpenAt(fullText, sliceStart)) {
+    result = prependHighlightOpener(result);
+  }
+  if (highlightOpenAt(fullText, sliceEnd)) {
+    result = `${result}==`;
+  }
+  return result;
 }
 function splitSegmentByFootnotes(segment) {
   const re = new RegExp(FOOTNOTE_REF_REGEX.source, "g");
@@ -137,7 +253,9 @@ function getVerseParts(text, verseNumber) {
   const span = findVerseSpan(text, verseNumber);
   if (!span)
     return null;
-  return splitVerseParts(text.slice(span.start, span.end));
+  return splitVerseParts(
+    stripEditorialBreaks(text.slice(span.start, span.end))
+  );
 }
 function getVerseFragments(text, verseNumber) {
   const hits = scanMarkers(text);
@@ -148,9 +266,14 @@ function getVerseFragments(text, verseNumber) {
     if (text[hits[i].afterMarker] !== " ")
       continue;
     const contentStart = hits[i].afterMarker + 1;
-    const contentEnd = i + 1 < hits.length ? hits[i + 1].index : text.length;
-    const raw = text.slice(contentStart, contentEnd);
-    const content = splitVerseParts(raw).filter((p) => p.length > 0).join(" ");
+    const hardEnd = i + 1 < hits.length ? hits[i + 1].index : text.length;
+    const raw = balanceHighlights(
+      text.slice(contentStart, hardEnd),
+      text,
+      contentStart,
+      hardEnd
+    );
+    const content = splitVerseParts(stripEditorialBreaks(raw)).filter((p) => p.length > 0).join(" ");
     fragments.push({ part: hits[i].part, content });
   }
   return fragments;
@@ -167,7 +290,9 @@ function getVerseContent(text, verseNumber, part = null) {
       const span = findVerseSpan(text, verseNumber);
       if (!span)
         return null;
-      const parts = splitVerseParts(text.slice(span.start, span.end));
+      const parts = splitVerseParts(
+        stripEditorialBreaks(text.slice(span.start, span.end))
+      );
       const idx = partToIndex(part);
       if (idx < 0 || idx >= parts.length)
         return null;
@@ -204,12 +329,20 @@ function getVerseRangeRawText(text, start, end) {
     return null;
   const startPos = lineLeadStart(text, hits[firstIdx].index);
   const contentEnd = lastIdx + 1 < hits.length ? lineLeadStart(text, hits[lastIdx + 1].index) : text.length;
-  const raw = text.slice(startPos, contentEnd).trimEnd();
+  const sliceEnd = contentEnd;
+  let raw = text.slice(startPos, sliceEnd);
+  const trimmedLen = raw.trimEnd().length;
+  raw = raw.slice(0, trimmedLen);
+  raw = balanceHighlights(raw, text, startPos, startPos + trimmedLen);
+  raw = stripEditorialBreaks(raw);
   return stripTrailingHeadingsBeforeNextVerse(raw);
 }
 function lineLeadStart(text, markerIndex) {
   const lineStart = text.lastIndexOf("\n", markerIndex - 1) + 1;
-  const lead = text.slice(lineStart, markerIndex);
+  let lead = text.slice(lineStart, markerIndex);
+  while (lead.length > 0 && INLINE_FORMAT_DELIM.test(lead.charAt(lead.length - 1))) {
+    lead = lead.slice(0, -1);
+  }
   return /^\s*(?:>\s?)*$/.test(lead) ? lineStart : markerIndex;
 }
 function stripTrailingHeadingsBeforeNextVerse(raw) {
@@ -303,7 +436,10 @@ function continuationPartAnchor(text, blockStartLine) {
   let headingCount = 0;
   let verseNumber = null;
   for (let i = blockStartLine - 1; i >= 0; i--) {
-    if (HEADING_LINE_REGEX.test(stripBlockquoteMarker(lines[i]))) {
+    const stripped = stripBlockquoteMarker(lines[i]);
+    if (findVerseBreakIndex(lines[i]) !== -1)
+      return null;
+    if (HEADING_LINE_REGEX.test(stripped)) {
       headingCount++;
       continue;
     }
@@ -422,37 +558,53 @@ function isInsideSkipped(node, skipEmbeds = true) {
   }
   return false;
 }
+function appendVerseMarker(fragment, token) {
+  const { number, part } = parseMarkerToken(token);
+  const label = `${number}${part != null ? part : ""}`;
+  const markerEl = activeDocument.createElement("span");
+  markerEl.className = "verse-marker";
+  markerEl.id = `verse-${label}`;
+  markerEl.textContent = label;
+  fragment.appendChild(markerEl);
+}
+function nextInlineToken(text, from) {
+  const slice = text.slice(from);
+  const brRel = findVerseBreakIndex(slice);
+  const brIdx = brRel === -1 ? -1 : from + brRel;
+  const m = execVerseMarker(getVerseRegex(), slice);
+  const markerIdx = m ? from + m.index : -1;
+  if (brIdx === -1 && markerIdx === -1)
+    return null;
+  if (markerIdx === -1 || brIdx !== -1 && brIdx < markerIdx) {
+    return { index: brIdx, length: VERSE_BREAK_TOKEN.length, kind: "break" };
+  }
+  return { index: markerIdx, length: m[0].length, kind: "marker", token: m[0] };
+}
 function processTextNode(textNode) {
   var _a;
   const text = (_a = textNode.nodeValue) != null ? _a : "";
-  const re = getVerseRegex();
-  const matches = [];
-  let match;
-  while ((match = execVerseMarker(re, text)) !== null) {
-    matches.push(match);
-  }
-  if (matches.length === 0)
+  if (nextInlineToken(text, 0) === null)
     return false;
   const parent = textNode.parentNode;
   if (!parent)
     return false;
   const fragment = activeDocument.createDocumentFragment();
   let lastIndex = 0;
-  for (const m of matches) {
-    const start = m.index;
-    const token = m[0];
-    const end = start + token.length;
-    if (start > lastIndex) {
-      fragment.appendChild(activeDocument.createTextNode(text.slice(lastIndex, start)));
+  let pos = 0;
+  while (pos < text.length) {
+    const hit = nextInlineToken(text, pos);
+    if (!hit)
+      break;
+    if (hit.index > lastIndex) {
+      fragment.appendChild(
+        activeDocument.createTextNode(text.slice(lastIndex, hit.index))
+      );
     }
-    const { number, part } = parseMarkerToken(token);
-    const label = `${number}${part != null ? part : ""}`;
-    const markerEl = activeDocument.createElement("span");
-    markerEl.className = "verse-marker";
-    markerEl.id = `verse-${label}`;
-    markerEl.textContent = label;
-    fragment.appendChild(markerEl);
-    lastIndex = end;
+    if (hit.kind === "marker") {
+      appendVerseMarker(fragment, hit.token);
+    }
+    lastIndex = hit.index + hit.length;
+    pos = lastIndex;
   }
   if (lastIndex < text.length) {
     fragment.appendChild(activeDocument.createTextNode(text.slice(lastIndex)));
@@ -515,12 +667,24 @@ function injectPartAnchor(el, id) {
   anchor.setAttribute("aria-hidden", "true");
   el.insertBefore(anchor, el.firstChild);
 }
+function hideVerseBreakBlock(el, ctx) {
+  const info = ctx.getSectionInfo(el);
+  if (!info)
+    return;
+  const blockText = info.text.split("\n").slice(info.lineStart, info.lineEnd + 1).join("\n");
+  if (!isVerseBreakLine(blockText))
+    return;
+  el.addClass("verse-break");
+  el.empty();
+  el.setAttr("aria-hidden", "true");
+}
 function versePostProcessor(el, ctx) {
   const textNodes = collectTextNodes(el);
   for (const tn of textNodes) {
     processTextNode(tn);
   }
   if (ctx) {
+    hideVerseBreakBlock(el, ctx);
     const partId = partAnchorForBlock(el, ctx);
     if (partId)
       injectPartAnchor(el, partId);
@@ -624,6 +788,156 @@ function registerCommands(plugin) {
 
 // src/references.ts
 var import_obsidian2 = require("obsidian");
+
+// src/highlights.ts
+var HEADING_LINE_REGEX2 = /^\s*#{1,6}\s+\S.*$/;
+function stripBlockquoteMarker2(line) {
+  return line.replace(/^\s*>\s?/, "");
+}
+function findHighlightRanges(text, baseOffset = 0) {
+  const ranges = [];
+  let paraLines = [];
+  let paraStart = 0;
+  let cursor = 0;
+  let inFence = false;
+  const flushPara = () => {
+    if (paraLines.length === 0)
+      return;
+    const para = paraLines.join("\n");
+    findHighlightPairsInParagraph(para, baseOffset + paraStart, ranges);
+    paraLines = [];
+  };
+  for (const line of text.split("\n")) {
+    const lineStart = cursor;
+    cursor += line.length + 1;
+    if (line.trimStart().startsWith("```")) {
+      flushPara();
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence)
+      continue;
+    const stripped = stripBlockquoteMarker2(line);
+    if (/^\s*$/.test(stripped) || HEADING_LINE_REGEX2.test(stripped)) {
+      flushPara();
+      continue;
+    }
+    if (paraLines.length === 0)
+      paraStart = lineStart;
+    paraLines.push(line);
+  }
+  flushPara();
+  return ranges;
+}
+function findHighlightPairsInParagraph(paragraph, baseOffset, out) {
+  let inInlineCode = false;
+  let i = 0;
+  while (i < paragraph.length) {
+    if (paragraph[i] === "`") {
+      inInlineCode = !inInlineCode;
+      i++;
+      continue;
+    }
+    if (!inInlineCode && paragraph.slice(i, i + 2) === "==") {
+      if (i > 0 && paragraph[i - 1] === "\\") {
+        i += 2;
+        continue;
+      }
+      const innerStart = i + 2;
+      const close = findClosingHighlight(paragraph, innerStart, inInlineCode);
+      if (close !== -1) {
+        out.push({ start: baseOffset + innerStart, end: baseOffset + close });
+        i = close + 2;
+        continue;
+      }
+    }
+    i++;
+  }
+}
+function findClosingHighlight(paragraph, from, startInCode) {
+  let inInlineCode = startInCode;
+  let i = from;
+  while (i < paragraph.length) {
+    if (paragraph[i] === "`") {
+      inInlineCode = !inInlineCode;
+      i++;
+      continue;
+    }
+    if (!inInlineCode && paragraph.slice(i, i + 2) === "==") {
+      if (i > from && paragraph[i - 1] === "\\") {
+        i += 2;
+        continue;
+      }
+      return i;
+    }
+    i++;
+  }
+  return -1;
+}
+function convertHighlightSyntaxToHtml(text) {
+  const out = [];
+  let paraLines = [];
+  let inFence = false;
+  const flushPara = () => {
+    if (paraLines.length > 0) {
+      out.push(convertHighlightInParagraph(paraLines.join("\n")));
+      paraLines = [];
+    }
+  };
+  for (const line of text.split("\n")) {
+    if (line.trimStart().startsWith("```")) {
+      flushPara();
+      inFence = !inFence;
+      out.push(line);
+      continue;
+    }
+    if (inFence) {
+      out.push(line);
+      continue;
+    }
+    const stripped = stripBlockquoteMarker2(line);
+    if (/^\s*$/.test(stripped) || HEADING_LINE_REGEX2.test(stripped)) {
+      flushPara();
+      out.push(line);
+      continue;
+    }
+    paraLines.push(line);
+  }
+  flushPara();
+  return out.join("\n");
+}
+function convertHighlightInParagraph(paragraph) {
+  let result = "";
+  let inInlineCode = false;
+  let i = 0;
+  while (i < paragraph.length) {
+    if (paragraph[i] === "`") {
+      inInlineCode = !inInlineCode;
+      result += paragraph[i];
+      i++;
+      continue;
+    }
+    if (!inInlineCode && paragraph.slice(i, i + 2) === "==") {
+      if (i > 0 && paragraph[i - 1] === "\\") {
+        result += "==";
+        i += 2;
+        continue;
+      }
+      const innerStart = i + 2;
+      const close = findClosingHighlight(paragraph, innerStart, inInlineCode);
+      if (close !== -1) {
+        result += `<mark>${paragraph.slice(innerStart, close)}</mark>`;
+        i = close + 2;
+        continue;
+      }
+    }
+    result += paragraph[i];
+    i++;
+  }
+  return result;
+}
+
+// src/references.ts
 function partToIndex2(part) {
   return part.charCodeAt(0) - "a".charCodeAt(0);
 }
@@ -686,7 +1000,16 @@ function buildSingleCore(content, verse, part) {
     const line = `${verseMarkerLabel(`${verse}${part}`)} ${verseText}`;
     return applyBlockquotePrefix(line, prefix);
   }
-  const blocks = getVerseFragments(content, verse).filter((f) => f.content.length > 0).map((f) => {
+  const fragments = getVerseFragments(content, verse);
+  if (fragments.length === 0)
+    return null;
+  if (fragments.length === 1 && fragments[0].part === null) {
+    const raw = getVerseRangeRawText(content, verse, verse);
+    if (raw && raw.length > 0) {
+      return applyBlockquotePrefix(raw, prefix);
+    }
+  }
+  const blocks = fragments.filter((f) => f.content.length > 0).map((f) => {
     const label = f.part ? `${verse}${f.part}` : `${verse}`;
     const line = `${verseMarkerLabel(label)} ${f.content}`;
     return applyBlockquotePrefix(line, prefix);
@@ -844,7 +1167,13 @@ async function renderVersePopover(plugin, popover, isAlive, file, fragment, sour
   const preview = content.createDiv({
     cls: "markdown-preview-view markdown-rendered"
   });
-  await import_obsidian2.MarkdownRenderer.render(plugin.app, markdown, preview, file.path, popover);
+  await import_obsidian2.MarkdownRenderer.render(
+    plugin.app,
+    convertHighlightSyntaxToHtml(markdown),
+    preview,
+    file.path,
+    popover
+  );
   if (!isAlive())
     return;
   const openLink = embed.createEl("a", {
@@ -1334,7 +1663,7 @@ var VerseEmbed = class extends import_obsidian3.Component {
     });
     await import_obsidian3.MarkdownRenderer.render(
       this.plugin.app,
-      markdown,
+      convertHighlightSyntaxToHtml(markdown),
       preview,
       this.file.path,
       this
@@ -1386,6 +1715,77 @@ function registerVerseEmbeds(plugin) {
     });
   } catch (e) {
   }
+}
+
+// src/livePreview.ts
+var import_view = require("@codemirror/view");
+var import_state = require("@codemirror/state");
+function markerInsideHighlight(from, to, highlights) {
+  return highlights.some((h) => from >= h.start && to <= h.end);
+}
+function collectDecorations(view) {
+  const doc = view.state.doc;
+  const fullText = doc.toString();
+  const highlights = findHighlightRanges(fullText);
+  const specs = [];
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from;
+    while (pos < to) {
+      const slice = doc.sliceString(pos, to);
+      const brRel = findVerseBreakIndex(slice);
+      const markerRe = getVerseRegex();
+      const m = execVerseMarker(markerRe, slice);
+      const brIdx = brRel === -1 ? -1 : pos + brRel;
+      const markerIdx = m ? pos + m.index : -1;
+      if (brIdx === -1 && markerIdx === -1)
+        break;
+      if (markerIdx === -1 || brIdx !== -1 && brIdx < markerIdx) {
+        const breakFrom = brIdx;
+        const breakTo = brIdx + VERSE_BREAK_TOKEN.length;
+        specs.push(
+          { from: breakFrom, to: breakFrom + 1, className: "verse-marker-bracket" },
+          { from: breakFrom + 1, to: breakTo - 1, className: "verse-marker" },
+          { from: breakTo - 1, to: breakTo, className: "verse-marker-bracket" }
+        );
+        pos = breakTo;
+        continue;
+      }
+      const matchFrom = markerIdx;
+      const matchTo = markerIdx + m[0].length;
+      if (markerInsideHighlight(matchFrom, matchTo, highlights)) {
+        specs.push({
+          from: matchFrom + 1,
+          to: matchTo - 1,
+          className: "verse-marker"
+        });
+      }
+      pos = matchTo;
+    }
+  }
+  specs.sort((a, b) => a.from - b.from);
+  return specs;
+}
+function buildDecorations(view) {
+  const builder = new import_state.RangeSetBuilder();
+  for (const { from, to, className } of collectDecorations(view)) {
+    builder.add(from, to, import_view.Decoration.mark({ class: className }));
+  }
+  return builder.finish();
+}
+var VerseMarkerLivePreviewPlugin = class {
+  constructor(view) {
+    this.decorations = buildDecorations(view);
+  }
+  update(update) {
+    if (update.docChanged || update.viewportChanged) {
+      this.decorations = buildDecorations(update.view);
+    }
+  }
+};
+function verseMarkerLivePreviewExtension() {
+  return import_view.ViewPlugin.fromClass(VerseMarkerLivePreviewPlugin, {
+    decorations: (plugin) => plugin.decorations
+  });
 }
 
 // src/settings.ts
@@ -1452,6 +1852,7 @@ var VerseMarkersPlugin = class extends import_obsidian5.Plugin {
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new VerseMarkersSettingTab(this.app, this));
+    this.registerEditorExtension(verseMarkerLivePreviewExtension());
     this.registerMarkdownPostProcessor((el, ctx) => {
       versePostProcessor(el, ctx);
       this.wireVerseAnchors(el);

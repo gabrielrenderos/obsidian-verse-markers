@@ -6,7 +6,9 @@ Originally built for study notes over scripture, but it works for any document w
 
 ## Features
 
-- **Inline verse markers** — Any token like `[3]` (or an authored part like `[3a]`) at the start of a line, after a blockquote `>`, or after whitespace is treated as a verse. Reading view renders it as just the label, colored with the theme's link accent. Live preview is left untouched so it keeps Obsidian's native look.
+- **Inline verse markers** — Any token like `[3]` (or an authored part like `[3a]`) at the start of a line, after a blockquote `>`, after whitespace, or inside inline formatting (`==highlight==`, `**bold**`, etc.) is treated as a verse. Reading view renders it as just the label, colored with the theme's link accent. Live Preview keeps Obsidian's native `[N]` look and adds a light accent on verse digits inside `==highlight==`.
+- **Verse breaks (`[//]`)** — Inline or on its own line, `[//]` toggles between verse text and editorial asides. Odd gaps (after the 1st, 3rd, … break) are excluded from popovers, embeds, flash, and whole-verse extraction; even gaps (after the 2nd, 4th, …) are verse again. The token is hidden in reading view; Live Preview shows it styled like another verse marker.
+- **Highlight-aware extraction** — `==highlight==` syntax is preserved in popovers and embeds, and verse markers inside highlights are recognized for linking and extraction.
 - **Wiki-link references** — `[[Gospel of John#verse-3]]` jumps to verse 3 in the target file. Ranges (`verse-3:7`) and parts (`verse-3a`, `verse-3b`, …) are supported, whether a part comes from a heading/footnote split or is written into the marker itself.
 - **Disjoint (skip-verse) references** — `[[File#verse-4:6/8:10]]` cites verses 4–6 **and** 8–10 while excluding 7, for lectionary-style passages that skip verses. The popover shows only the cited verses and the temporary highlight covers each piece, leaving the gaps untouched.
 - **Authored verse parts** — markers may carry a part suffix, e.g. `[5a]`, `[5b]`, `[12bc]`. A single canonical verse can be split into scattered, separately-marked pieces (even interleaved with other verses) and still be referenced as a whole or by individual part.
@@ -46,15 +48,14 @@ Write verse markers as bare `[N]` tokens in Markdown — or `[Na]` to carry an a
 ...and is followed by whitespace or end-of-line. There must be a single space between `]` and the verse content. The token is one or more digits, optionally followed by lowercase letters; the required leading digit keeps ordinary brackets such as `[note]` or footnotes `[^1]` from ever being mistaken for a marker.
 
 ```markdown
-[1] In the beginning was the Word, and the Word was with God, and the Word was God.
-[2] He was in the beginning with God.
-[3] All things were made through him, and without him was not any thing made
-that was made.
+[1] In the beginning was the Word, and the Word was with God, and the Word was God. [2] He was in the beginning with God. [3] All things were made through him, and without him was not any thing made that was made.
 
-> [4] In him was life, and the life was the light of men.
+[4] In him was life, and the life was the light of men. [5] The light shines in the darkness, and the darkness has not overcome it.
+
+> [6] There was a man sent from God, whose name was John. [7] He came as a witness, to bear witness about the light.
 ```
 
-Reading view renders each marker as the number only (brackets dropped), colored with the link accent so it visually matches the references that point to it.
+Several verses can share one line — each `[N]` still starts a new verse; content runs until the next marker (or a verse break). Reading view renders each marker as the number only (brackets dropped), colored with the link accent so it visually matches the references that point to it.
 
 ### Multi-line verses
 
@@ -68,6 +69,22 @@ and the darkness has not overcome it.
 ```
 
 `[[File#verse-5]]` resolves to both lines of verse 5.
+
+### Verse breaks (`[//]`)
+
+Use `[//]` when you need editorial text in the middle of a verse without folding it into the verse flow — notes, alternate readings, or commentary between chunks of the same verse. Each `[//]` **toggles** between verse mode and editorial mode:
+
+```markdown
+[27] Because death is certain for the one born, and birth is certain for the dead; therefore you should not lament the inevitable. [//] this is a comment [//] this is the continuation of the verse, and here it ends [//]
+
+==[28] The state of all beings before birth is unmanifest; their state between birth and death is manifest. [//] another break and here it continues [//] What reason is there then to lament? [29] Some consider this wonderful; others speak of it as such.==
+```
+
+- **1st gap** (after 1st `[//]`): editorial — excluded from `[[File#verse-27]]`, popovers, embeds, and flash.
+- **2nd gap** (after 2nd `[//]`): verse again — included.
+- **3rd gap** (after 3rd `[//]`): editorial again — excluded.
+
+The token works **inline** (`…verse text[//] note`) or on its **own line** (no required blank lines or surrounding whitespace). In reading view the `[//]` token is removed entirely; editorial text stays visible. In Live Preview, `[//]` is shown with the same muted-bracket / accent-label styling as `[N]`.
 
 ### Heading-split verses
 
@@ -233,14 +250,18 @@ obsidian://verse-markers?file=Notes/Gospel%20of%20John.md&verse=3&part=a
 
 ## Styling
 
-The plugin intentionally does **not** ship custom colors, weights, or sizes. It uses exactly two style hooks, both driven by your theme's existing variables:
+The plugin intentionally does **not** ship custom colors, weights, or sizes beyond what your theme already provides. The main hooks:
 
 ```css
-.verse-marker { color: var(--link-color); }           /* reading view: the number */
-.verse-hover-preview { ... var(--text-normal) ... }   /* range hover popover */
+.verse-marker { color: var(--link-color); }              /* reading view + LP accents */
+.verse-marker-bracket { color: var(--text-faint); }      /* Live Preview: [//] brackets */
+.verse-hover-preview mark,
+.verse-embed mark { background-color: var(--text-highlight-bg); }  /* == in popovers/embeds */
 ```
 
-Live preview is entirely untouched — Obsidian's native handling of `[N]` (light-gray brackets, accent-colored digits, because it looks like a partial Markdown link) is already what we want, and adding a decoration layer would only risk drifting from your theme.
+**Live Preview:** Obsidian's native handling of `[N]` (light-gray brackets, accent-colored digits) is left alone outside highlights. Inside `==highlight==`, verse digits get an accent-color decoration so they stay readable on the highlight background. `[//]` breaks are always decorated the same way (muted `[` `]`, accent `//`) because Obsidian does not style them natively.
+
+**Reading view:** verse labels render as accent-colored numbers (brackets dropped). `[//]` tokens are removed; editorial text around them stays.
 
 If you want to restyle, drop overrides into a CSS snippet:
 
@@ -253,7 +274,9 @@ If you want to restyle, drop overrides into a CSS snippet:
 
 ## Behavior notes & edge cases
 
-- **Marker recognition is boundary-aware.** `[3]` works; `text[3]text` (no whitespace) does not. A marker inside a code block, inline code, or math is skipped entirely.
+- **Marker recognition is boundary-aware.** `[3]` works; `text[3]text` (no whitespace) does not. A marker inside a code block, inline code, or math is skipped entirely. Markers immediately after inline-format delimiters (`==[3]`, `**[3]**`, etc.) are recognized.
+- **Verse breaks are toggle-based.** `[//]` alternates verse/editorial zones; only editorial gaps are stripped from extraction. The token itself never appears in reading view.
+- **Highlights in excerpts.** Popovers and embeds convert `==text==` to `<mark>` so highlighted verse text matches reading view. Unbalanced `==` at slice boundaries are closed so excerpts don't leak formatting.
 - **Skipped containers in reading view:** `<a>`, `<code>`, `<pre>`, `<math>`, `<mjx-container>`, `<table>`, `<img>`, and anything with `.math`, `.internal-embed`, or `.external-embed`.
 - **Verse uniqueness.** The plugin does not enforce unique verse *numbers* within a file. Repeating the same number with distinct part letters (`[5a]`, `[5b]`) is the intended way to author a scattered verse. Repeating a plain `[3]` with no part is not — for navigation the first one wins, though a whole-verse reference still gathers them all.
 - **Authored parts beat derived parts.** When a verse carries authored part letters, those are its parts; it is not *also* split by a heading or footnote inside a fragment.
@@ -285,7 +308,9 @@ npm run dev
 
 ```
 src/
-  detection.ts      Canonical verse regex, content extraction, fragment parsers.
+  detection.ts      Canonical verse regex, content extraction, fragment parsers, [//] breaks.
+  highlights.ts     ==highlight== range detection and HTML conversion for excerpts.
+  livePreview.ts    CM6 decorations for [N] inside highlights and [//] break styling.
   postprocessor.ts  Reading-view DOM rewrite + heading-split part anchor injection.
   references.ts     Link resolution, scroll-to-verse, range hover preview.
   embeds.ts         Native ![[File#verse-…]] embed rendering (reading + Live Preview).

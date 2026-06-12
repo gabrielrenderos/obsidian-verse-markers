@@ -26,6 +26,7 @@ import { App, Component, MarkdownRenderer, TFile, setIcon } from "obsidian";
 import { parseVerseSegments } from "./detection";
 import { buildSegmentsPreviewMarkdown, resolveVerseLink } from "./references";
 import { styleVerseMarkers } from "./postprocessor";
+import { convertHighlightSyntaxToHtml } from "./highlights";
 import type VerseMarkersPlugin from "./main";
 
 /** Minimal shape of the context Obsidian passes to an embed creator. */
@@ -166,7 +167,7 @@ class VerseEmbed extends Component {
     });
     await MarkdownRenderer.render(
       this.plugin.app,
-      markdown,
+      convertHighlightSyntaxToHtml(markdown),
       preview,
       this.file.path,
       this

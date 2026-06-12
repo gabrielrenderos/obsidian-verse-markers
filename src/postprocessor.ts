@@ -9,10 +9,13 @@
 import { MarkdownPostProcessorContext } from "obsidian";
 import {
   execVerseMarker,
+  findVerseBreakIndex,
   getVerseRegex,
   hasVerseMarker,
+  isVerseBreakLine,
   parseMarkerToken,
   continuationPartAnchor,
+  VERSE_BREAK_TOKEN,
   VERSE_FRAGMENT_TEST_STRICT,
   VERSE_FRAGMENT_TEST_LOOSE,
 } from "./detection";
@@ -59,49 +62,69 @@ function isInsideSkipped(node: Node, skipEmbeds = true): boolean {
 }
 
 /**
- * Processes a single Text node: replaces each verse marker "[N]"/"[Na]" token
- * with a single span containing just its label N (or "Na", brackets dropped).
- * The span carries id="verse-N" (or "verse-Na") for anchor navigation.
- * Returns true if any replacements were made.
+ * Appends a styled verse marker to `fragment` (brackets dropped — reading view).
+ */
+function appendVerseMarker(fragment: DocumentFragment, token: string): void {
+  const { number, part } = parseMarkerToken(token);
+  const label = `${number}${part ?? ""}`;
+  const markerEl = activeDocument.createElement("span");
+  markerEl.className = "verse-marker";
+  markerEl.id = `verse-${label}`;
+  markerEl.textContent = label;
+  fragment.appendChild(markerEl);
+}
+
+type InlineToken =
+  | { index: number; length: number; kind: "marker"; token: string }
+  | { index: number; length: number; kind: "break" };
+
+/** Next verse marker or `[//]` break in `text` at/after `from`. */
+function nextInlineToken(text: string, from: number): InlineToken | null {
+  const slice = text.slice(from);
+  const brRel = findVerseBreakIndex(slice);
+  const brIdx = brRel === -1 ? -1 : from + brRel;
+  const m = execVerseMarker(getVerseRegex(), slice);
+  const markerIdx = m ? from + m.index : -1;
+
+  if (brIdx === -1 && markerIdx === -1) return null;
+  if (markerIdx === -1 || (brIdx !== -1 && brIdx < markerIdx)) {
+    return { index: brIdx, length: VERSE_BREAK_TOKEN.length, kind: "break" };
+  }
+  return { index: markerIdx, length: m![0].length, kind: "marker", token: m![0] };
+}
+
+/**
+ * Processes a single Text node: styles verse markers and removes `[//]` break
+ * tokens (reading view). Editorial text after an inline break stays visible.
  */
 function processTextNode(textNode: Text): boolean {
   const text = textNode.nodeValue ?? "";
-  const re = getVerseRegex();
-  const matches: RegExpExecArray[] = [];
-  let match: RegExpExecArray | null;
-
-  while ((match = execVerseMarker(re, text)) !== null) {
-    matches.push(match);
-  }
-
-  if (matches.length === 0) return false;
+  if (nextInlineToken(text, 0) === null) return false;
 
   const parent = textNode.parentNode;
   if (!parent) return false;
 
   const fragment = activeDocument.createDocumentFragment();
   let lastIndex = 0;
+  let pos = 0;
 
-  for (const m of matches) {
-    const start = m.index;
-    const token = m[0];
-    const end = start + token.length;
+  while (pos < text.length) {
+    const hit = nextInlineToken(text, pos);
+    if (!hit) break;
 
-    if (start > lastIndex) {
-      fragment.appendChild(activeDocument.createTextNode(text.slice(lastIndex, start)));
+    if (hit.index > lastIndex) {
+      fragment.appendChild(
+        activeDocument.createTextNode(text.slice(lastIndex, hit.index))
+      );
     }
 
-    // Strip the brackets: render only the label (number + any authored part
-    // letters), carrying the matching verse id.
-    const { number, part } = parseMarkerToken(token);
-    const label = `${number}${part ?? ""}`;
-    const markerEl = activeDocument.createElement("span");
-    markerEl.className = "verse-marker";
-    markerEl.id = `verse-${label}`;
-    markerEl.textContent = label;
+    if (hit.kind === "marker") {
+      appendVerseMarker(fragment, hit.token);
+    }
+    // break: omit token from reading view (editorial text after it remains)
 
-    fragment.appendChild(markerEl);
-    lastIndex = end;
+    lastIndex = hit.index + hit.length;
+    pos = lastIndex;
   }
 
   if (lastIndex < text.length) {
@@ -215,6 +238,25 @@ function injectPartAnchor(el: HTMLElement, id: string): void {
 }
 
 /**
+ * Hides a block whose source is only a verse-break line (`[//]`).
+ */
+function hideVerseBreakBlock(
+  el: HTMLElement,
+  ctx: MarkdownPostProcessorContext
+): void {
+  const info = ctx.getSectionInfo(el);
+  if (!info) return;
+  const blockText = info.text
+    .split("\n")
+    .slice(info.lineStart, info.lineEnd + 1)
+    .join("\n");
+  if (!isVerseBreakLine(blockText)) return;
+  el.addClass("verse-break");
+  el.empty();
+  el.setAttr("aria-hidden", "true");
+}
+
+/**
  * The MarkdownPostProcessor to register with Obsidian.
  * Idempotent: a text node that has already been split into spans will
  * contain no raw [N] tokens, so a second pass is a no-op.
@@ -232,6 +274,7 @@ export function versePostProcessor(
   }
 
   if (ctx) {
+    hideVerseBreakBlock(el, ctx);
     const partId = partAnchorForBlock(el, ctx);
     if (partId) injectPartAnchor(el, partId);
   }

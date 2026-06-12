@@ -24,6 +24,7 @@ import { versePostProcessor, collectVerseAnchors } from "./postprocessor";
 import { registerCommands } from "./commands";
 import { resolveVerseLink, registerVersePagePreview } from "./references";
 import { registerVerseEmbeds } from "./embeds";
+import { verseMarkerLivePreviewExtension } from "./livePreview";
 import {
   VerseMarkersSettings,
   DEFAULT_SETTINGS,
@@ -42,9 +43,9 @@ export default class VerseMarkersPlugin extends Plugin {
     // Settings tab
     this.addSettingTab(new VerseMarkersSettingTab(this.app, this));
 
-    // Live preview is intentionally left alone — Obsidian's native rendering
-    // of [N] (light-gray brackets + accent-color digits) is already what we
-    // want, and any CM6 decoration layer would only risk drifting from it.
+    // Live Preview: one CM6 wrapper per ==highlight== interior so theme chrome
+    // (incl. dotted underlines) stays continuous across [N] markers.
+    this.registerEditorExtension(verseMarkerLivePreviewExtension());
 
     // Reading view post-processor: rewrites [N] text → spans, injects
     // part-b/c/… continuation anchors for heading-split verses, and wires

@@ -41,6 +41,7 @@ import {
   type VerseSegment,
 } from "./detection";
 import { collectVerseAnchors } from "./postprocessor";
+import { convertHighlightSyntaxToHtml } from "./highlights";
 import type VerseMarkersPlugin from "./main";
 
 /** Converts a single lowercase letter "a".."z" to a zero-based index. */
@@ -163,7 +164,19 @@ function buildSingleCore(
     return applyBlockquotePrefix(line, prefix);
   }
 
-  const blocks = getVerseFragments(content, verse)
+  const fragments = getVerseFragments(content, verse);
+  if (fragments.length === 0) return null;
+
+  // Plain single `[N]`: raw slice preserves ==highlight== wrapping the marker
+  // (when the highlight opens before it), so popover/embed match reading view.
+  if (fragments.length === 1 && fragments[0].part === null) {
+    const raw = getVerseRangeRawText(content, verse, verse);
+    if (raw && raw.length > 0) {
+      return applyBlockquotePrefix(raw, prefix);
+    }
+  }
+
+  const blocks = fragments
     .filter((f) => f.content.length > 0)
     .map((f) => {
       const label = f.part ? `${verse}${f.part}` : `${verse}`;
@@ -478,7 +491,13 @@ async function renderVersePopover(
     cls: "markdown-preview-view markdown-rendered",
   });
 
-  await MarkdownRenderer.render(plugin.app, markdown, preview, file.path, popover);
+  await MarkdownRenderer.render(
+    plugin.app,
+    convertHighlightSyntaxToHtml(markdown),
+    preview,
+    file.path,
+    popover
+  );
   if (!isAlive()) return;
 
   // Corner "open" affordance, same chrome class as the native popover.

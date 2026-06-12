@@ -5,16 +5,71 @@
  * rewrite what Obsidian would otherwise render, then let Obsidian's own
  * theme variables decide how it looks.
  *
- * Live preview is intentionally untouched — the native Obsidian rendering
- * of `[N]` (a light-gray bracket + accent-color text) already matches the
- * look we want, so there is no CM6 decoration layer.
+ * Live preview leaves ==highlight== rendering to Obsidian; only the verse
+ * label digits get an accent-color CM6 mark inside highlights (livePreview.ts).
  *
- * Reading view rewrites `[N]` to a bare number span and colors it with the
- * native link accent color so it visually matches the editor.
+ * Reading view always drops brackets and shows only the accent-colored label.
  */
 
-/* Reading view: the verse number (brackets are dropped entirely). */
+/* Verse label (reading view, popover/embed, and LP label accent). */
 .verse-marker {
+  color: var(--link-color);
+}
+
+/* Live Preview: accent color on the label inside ==highlight== only. */
+.markdown-source-view.mod-cm6 .verse-marker {
+  color: var(--link-color);
+}
+
+/* Live Preview: `[//]` breaks — same bracket/label treatment as native `[N]`. */
+.markdown-source-view.mod-cm6 .verse-marker-bracket {
+  color: var(--text-faint);
+}
+
+/* Reading view: standalone `[//]` line is hidden (inline tokens stripped in postprocessor). */
+.verse-break {
+  display: none;
+}
+
+/*
+ * Obsidian pads every span.cm-highlight (typically 1–2px inline). Punctuation
+ * like [ ] splits a highlight into tiny fragments, so each bracket picks up
+ * extra horizontal spacing. Zero horizontal padding (not vertical) on
+ * highlight runs that touch a verse marker so bracket spacing matches normal
+ * glyphs while highlight height stays uniform.
+ */
+.markdown-source-view.mod-cm6 span.cm-highlight:has(> .verse-marker),
+.markdown-source-view.mod-cm6 span.cm-highlight:has(> .verse-marker-bracket) {
+  padding-inline: 0;
+  border-radius: 0;
+}
+
+.markdown-source-view.mod-cm6 span.cm-highlight:has(+ span.cm-highlight > .verse-marker),
+.markdown-source-view.mod-cm6 span.cm-highlight:has(+ span.cm-highlight .verse-marker),
+.markdown-source-view.mod-cm6 span.cm-highlight:has(+ span.cm-highlight > .verse-marker-bracket),
+.markdown-source-view.mod-cm6 span.cm-highlight:has(+ span.cm-highlight .verse-marker-bracket) {
+  padding-inline: 0;
+  border-radius: 0;
+}
+
+.markdown-source-view.mod-cm6 span.cm-highlight:has(.verse-marker) + span.cm-highlight,
+.markdown-source-view.mod-cm6 span.cm-highlight:has(.verse-marker-bracket) + span.cm-highlight {
+  padding-inline: 0;
+  border-radius: 0;
+}
+
+/* Popover + embed: theme highlight fill on <mark> from convertHighlightSyntaxToHtml. */
+.verse-hover-preview mark,
+.verse-embed mark {
+  background-color: var(--text-highlight-bg);
+  color: var(--text-normal);
+}
+
+/* Label span inside <mark> must not paint its own background (would "cut" the highlight). */
+.verse-hover-preview mark .verse-marker,
+.verse-embed mark .verse-marker,
+.markdown-rendered mark .verse-marker {
+  background-color: transparent;
   color: var(--link-color);
 }
 

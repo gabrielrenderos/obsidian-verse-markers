@@ -11,7 +11,8 @@
  * Matches [N] or [N<part>] where N is one or more digits optionally followed
  * by lowercase letters (an *authored* part suffix, e.g. [5a], [12bc]), with
  * boundary conditions:
- * - preceded by start-of-string, >, or whitespace
+ * - preceded by start-of-string, >, whitespace, or inline-format delimiters
+ *   (=, *, ~, _) so markers inside ==highlight== / **bold** / etc. match
  * - followed by whitespace or end-of-string
  *
  * The required leading digit keeps this from matching ordinary bracketed
@@ -35,14 +36,32 @@ export function getVerseRegex(): RegExp {
   return new RegExp(VERSE_MARKER_REGEX.source, VERSE_MARKER_REGEX.flags);
 }
 
+/** Inline-format delimiter chars that may immediately precede a verse marker. */
+const INLINE_FORMAT_DELIM = /=|[*~_]/;
+
 /**
  * True when a marker found at `index` sits at a valid left boundary: the
- * start of the text, or immediately after ">" or any whitespace. This is the
- * lookbehind-free equivalent of the old `(?:^|(?<=[>\s]))` prefix.
+ * start of the text, or immediately after ">" or any whitespace, optionally
+ * preceded by a run of inline-format delimiters (==, **, ~~, __). This is the
+ * lookbehind-free equivalent of the old `(?:^|(?<=[>\s]))` prefix, extended
+ * so ==[N] and similar forms are recognized in raw-text scans.
  */
 export function atVerseBoundary(text: string, index: number): boolean {
   if (index <= 0) return true;
-  const prev = text.charAt(index - 1);
+  let pos = index - 1;
+  while (pos >= 0) {
+    if (INLINE_FORMAT_DELIM.test(text.charAt(pos))) {
+      pos--;
+      continue;
+    }
+    if (text.charAt(pos) === "\\") {
+      pos--;
+      continue;
+    }
+    break;
+  }
+  if (pos < 0) return true;
+  const prev = text.charAt(pos);
   return prev === ">" || /\s/.test(prev);
 }
 
@@ -134,14 +153,164 @@ function scanMarkers(text: string): MarkerHit[] {
  * Heading lines (and any footnote on them) are never included in any part.
  * A reference without a part (verse-N) returns the parts joined by a single
  * space so the boundary-adjacent newlines don't leak through.
+ *
+ * A verse-break `[//]` (on its own line or inline) toggles between verse text
+ * and editorial asides. Odd gaps (after 1st, 3rd, … break) are excluded; even
+ * gaps (after 2nd, 4th, …) are verse again until the next `[N]` marker.
  * ------------------------------------------------------------------------- */
 
 /** ATX-style heading line: optional indent, 1–6 `#`, at least one non-space char after. */
 const HEADING_LINE_REGEX = /^\s*#{1,6}\s+\S.*$/;
 
+/** Literal verse-break token (inline or on its own line). */
+export const VERSE_BREAK_TOKEN = "[//]";
+
+/**
+ * Index of the first `[//]` in `text` at or after `from`, or -1. Ignores a
+ * backslash escape immediately before the token. Works inline (e.g.
+ * `[5] verse[//] note[//] more verse`) as well as on a dedicated line.
+ */
+export function findVerseBreakIndex(text: string, from = 0): number {
+  let pos = from;
+  while (pos < text.length) {
+    const idx = text.indexOf(VERSE_BREAK_TOKEN, pos);
+    if (idx === -1) return -1;
+    if (idx > 0 && text[idx - 1] === "\\") {
+      pos = idx + VERSE_BREAK_TOKEN.length;
+      continue;
+    }
+    return idx;
+  }
+  return -1;
+}
+
+/**
+ * True when `line` is only `[//]` (optional blockquote / indent). Optional
+ * trailing spaces on the line are allowed.
+ */
+export function isVerseBreakLine(line: string): boolean {
+  return /^\s*(?:>\s?)*\[\/\/\]\s*$/.test(line);
+}
+
 /** Strips one level of leading "> " blockquote marker from a line. */
 function stripBlockquoteMarker(line: string): string {
   return line.replace(/^\s*>\s?/, "");
+}
+
+/**
+ * Keeps verse-mode spans and drops editorial spans between alternating `[//]`
+ * toggles (1st gap editorial, 2nd gap verse again, etc.).
+ */
+function stripEditorialBreaks(raw: string): string {
+  const parts: string[] = [];
+  let inVerse = true;
+  let pos = 0;
+  while (pos < raw.length) {
+    const br = findVerseBreakIndex(raw, pos);
+    if (br === -1) {
+      if (inVerse) parts.push(raw.slice(pos));
+      break;
+    }
+    if (inVerse) parts.push(raw.slice(pos, br));
+    inVerse = !inVerse;
+    pos = br + VERSE_BREAK_TOKEN.length;
+  }
+  return parts.join("");
+}
+
+/**
+ * Returns the offset in `text` where the paragraph enclosing `offset`
+ * begins. Paragraphs break at blank lines and ATX headings (blockquote
+ * markers stripped when testing), mirroring Obsidian's inline highlight scope.
+ */
+function paragraphStartAt(text: string, offset: number): number {
+  let lineStart = text.lastIndexOf("\n", offset - 1) + 1;
+  while (lineStart > 0) {
+    const prevLineEnd = lineStart - 1;
+    const prevLineStart = text.lastIndexOf("\n", prevLineEnd - 1) + 1;
+    const prevLine = text.slice(prevLineStart, prevLineEnd);
+    const stripped = stripBlockquoteMarker(prevLine);
+    if (/^\s*$/.test(stripped) || HEADING_LINE_REGEX.test(stripped)) break;
+    lineStart = prevLineStart;
+  }
+  return lineStart;
+}
+
+/**
+ * Scans `text[start..end)` for `==` highlight delimiters (Obsidian syntax),
+ * returning whether a highlight is open at `end`. Resets are implicit via the
+ * caller limiting `start` to a paragraph boundary. Ignores `\==` escapes and
+ * `==` inside inline backticks or fenced ``` blocks.
+ */
+function highlightOpenAt(text: string, offset: number): boolean {
+  const start = paragraphStartAt(text, offset);
+  let open = false;
+  let inInlineCode = false;
+  let inFence = false;
+  let i = start;
+
+  while (i < offset) {
+    if (text.slice(i, i + 3) === "```") {
+      if (!inInlineCode) {
+        inFence = !inFence;
+        i += 3;
+        continue;
+      }
+    }
+
+    if (!inFence) {
+      if (text[i] === "`") {
+        inInlineCode = !inInlineCode;
+        i++;
+        continue;
+      }
+      if (!inInlineCode && text.slice(i, i + 2) === "==") {
+        if (i > start && text[i - 1] === "\\") {
+          i += 2;
+          continue;
+        }
+        open = !open;
+        i += 2;
+        continue;
+      }
+    }
+    i++;
+  }
+  return open;
+}
+
+/**
+ * Prepends `==` after the first line's blockquote/whitespace lead-in so a
+ * blockquoted verse keeps valid `> ==text` structure.
+ */
+function prependHighlightOpener(slice: string): string {
+  const nl = slice.indexOf("\n");
+  const firstLine = nl === -1 ? slice : slice.slice(0, nl);
+  const rest = nl === -1 ? "" : slice.slice(nl);
+  const lead = /^(\s*(?:>\s?)*)/.exec(firstLine);
+  const prefix = lead ? lead[1] : "";
+  return `${prefix}==${firstLine.slice(prefix.length)}${rest}`;
+}
+
+/**
+ * When a raw markdown slice is cut from a larger note, `==` pairs that span
+ * the cut may be unbalanced. Prepends/closes highlight markers so the slice
+ * renders with the same highlighting as the source document.
+ */
+function balanceHighlights(
+  slice: string,
+  fullText: string,
+  sliceStart: number,
+  sliceEnd: number
+): string {
+  let result = slice;
+  if (highlightOpenAt(fullText, sliceStart)) {
+    result = prependHighlightOpener(result);
+  }
+  if (highlightOpenAt(fullText, sliceEnd)) {
+    result = `${result}==`;
+  }
+  return result;
 }
 
 /**
@@ -239,7 +408,9 @@ export function getVerseParts(
 ): string[] | null {
   const span = findVerseSpan(text, verseNumber);
   if (!span) return null;
-  return splitVerseParts(text.slice(span.start, span.end));
+  return splitVerseParts(
+    stripEditorialBreaks(text.slice(span.start, span.end))
+  );
 }
 
 /**
@@ -276,9 +447,14 @@ export function getVerseFragments(
     if (hits[i].number !== verseNumber) continue;
     if (text[hits[i].afterMarker] !== " ") continue; // malformed marker
     const contentStart = hits[i].afterMarker + 1;
-    const contentEnd = i + 1 < hits.length ? hits[i + 1].index : text.length;
-    const raw = text.slice(contentStart, contentEnd);
-    const content = splitVerseParts(raw)
+    const hardEnd = i + 1 < hits.length ? hits[i + 1].index : text.length;
+    const raw = balanceHighlights(
+      text.slice(contentStart, hardEnd),
+      text,
+      contentStart,
+      hardEnd
+    );
+    const content = splitVerseParts(stripEditorialBreaks(raw))
       .filter((p) => p.length > 0)
       .join(" ");
     fragments.push({ part: hits[i].part, content });
@@ -313,7 +489,9 @@ export function getVerseContent(
     if (fragments.length === 1 && fragments[0].part === null) {
       const span = findVerseSpan(text, verseNumber);
       if (!span) return null;
-      const parts = splitVerseParts(text.slice(span.start, span.end));
+      const parts = splitVerseParts(
+        stripEditorialBreaks(text.slice(span.start, span.end))
+      );
       const idx = partToIndex(part);
       if (idx < 0 || idx >= parts.length) return null;
       return parts[idx];
@@ -397,7 +575,12 @@ export function getVerseRangeRawText(
       ? lineLeadStart(text, hits[lastIdx + 1].index)
       : text.length;
 
-  const raw = text.slice(startPos, contentEnd).trimEnd();
+  const sliceEnd = contentEnd;
+  let raw = text.slice(startPos, sliceEnd);
+  const trimmedLen = raw.trimEnd().length;
+  raw = raw.slice(0, trimmedLen);
+  raw = balanceHighlights(raw, text, startPos, startPos + trimmedLen);
+  raw = stripEditorialBreaks(raw);
   return stripTrailingHeadingsBeforeNextVerse(raw);
 }
 
@@ -412,7 +595,10 @@ export function getVerseRangeRawText(
  */
 function lineLeadStart(text: string, markerIndex: number): number {
   const lineStart = text.lastIndexOf("\n", markerIndex - 1) + 1;
-  const lead = text.slice(lineStart, markerIndex);
+  let lead = text.slice(lineStart, markerIndex);
+  while (lead.length > 0 && INLINE_FORMAT_DELIM.test(lead.charAt(lead.length - 1))) {
+    lead = lead.slice(0, -1);
+  }
   return /^\s*(?:>\s?)*$/.test(lead) ? lineStart : markerIndex;
 }
 
@@ -586,7 +772,9 @@ export function continuationPartAnchor(
   let headingCount = 0;
   let verseNumber: number | null = null;
   for (let i = blockStartLine - 1; i >= 0; i--) {
-    if (HEADING_LINE_REGEX.test(stripBlockquoteMarker(lines[i]))) {
+    const stripped = stripBlockquoteMarker(lines[i]);
+    if (findVerseBreakIndex(lines[i]) !== -1) return null;
+    if (HEADING_LINE_REGEX.test(stripped)) {
       headingCount++;
       continue;
     }
