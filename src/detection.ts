@@ -210,6 +210,17 @@ export function charOffsetForLine(text: string, lineIndex: number): number {
 }
 
 /**
+ * True when text at `markerEnd` begins with whitespace and an inline footnote
+ * ref (`[^id]`). `[1] [^1]` is otherwise parsed as a reference link in LP.
+ */
+export function isFollowedByFootnoteRef(
+  text: string,
+  markerEnd: number
+): boolean {
+  return /^\s+\[\^[^\]\s]+\]/.test(text.slice(markerEnd));
+}
+
+/**
  * Verse/editorial toggle state in `text` immediately before `endOffset`, by
  * scanning `[N]` markers and `[//]` breaks from the start of the file.
  */

@@ -5,8 +5,8 @@
  * rewrite what Obsidian would otherwise render, then let Obsidian's own
  * theme variables decide how it looks.
  *
- * Live preview leaves ==highlight== rendering to Obsidian; only the verse
- * label digits get an accent-color CM6 mark inside highlights (livePreview.ts).
+ * Live Preview applies muted brackets + accent labels to `[N]` and `[//]`
+ * via CM6 marks (livePreview.ts); reading view drops brackets.
  *
  * Reading view always drops brackets and shows only the accent-colored label.
  */
@@ -16,14 +16,19 @@
   color: var(--link-color);
 }
 
-/* Live Preview: accent color on the label inside ==highlight== only. */
+/* Live Preview: verse marker label (`[N]` / `[//]` inner span). */
 .markdown-source-view.mod-cm6 .verse-marker {
   color: var(--link-color);
 }
 
-/* Live Preview: `[//]` brackets outside ==highlight== (inside, only `//` is accented). */
+/* Live Preview: verse marker brackets. */
 .markdown-source-view.mod-cm6 .verse-marker-bracket {
   color: var(--text-faint);
+}
+
+/* Live Preview: `[N]` before `[^id]` — same classes, replace avoids link parse. */
+.markdown-source-view.mod-cm6 .verse-marker-widget {
+  display: inline;
 }
 
 /* Reading view: standalone `[//]` line is hidden (inline tokens stripped in postprocessor). */

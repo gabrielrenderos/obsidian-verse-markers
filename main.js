@@ -122,6 +122,9 @@ function charOffsetForLine(text, lineIndex) {
   }
   return text.length;
 }
+function isFollowedByFootnoteRef(text, markerEnd) {
+  return /^\s+\[\^[^\]\s]+\]/.test(text.slice(markerEnd));
+}
 function verseProcessStateAt(text, endOffset) {
   const state = { inVerseSpan: false, inVerseMode: true };
   let pos = 0;
@@ -1926,10 +1929,64 @@ function registerVerseEmbeds(plugin) {
 // src/livePreview.ts
 var import_view2 = require("@codemirror/view");
 var import_state2 = require("@codemirror/state");
+var VerseMarkerWidget = class extends import_view2.WidgetType {
+  constructor(label) {
+    super();
+    this.label = label;
+  }
+  eq(other) {
+    return other instanceof VerseMarkerWidget && other.label === this.label;
+  }
+  /** Pass clicks/edits through; footnote `[^1]` after the widget stays interactive. */
+  ignoreEvent() {
+    return true;
+  }
+  toDOM() {
+    const wrap = document.createElement("span");
+    wrap.className = "verse-marker-widget";
+    const open = document.createElement("span");
+    open.className = "verse-marker-bracket";
+    open.textContent = "[";
+    const label = document.createElement("span");
+    label.className = "verse-marker";
+    label.textContent = this.label;
+    const close = document.createElement("span");
+    close.className = "verse-marker-bracket";
+    close.textContent = "]";
+    wrap.append(open, label, close);
+    return wrap;
+  }
+};
 function markerInsideHighlight(from, to, highlights) {
   return highlights.some((h) => from >= h.start && to <= h.end);
 }
-function collectDecorations(view) {
+function verseMarkerLabel2(token) {
+  const { number, part } = parseMarkerToken(token);
+  return `${number}${part != null ? part : ""}`;
+}
+function pushBracketLabelMarks(specs, tokenFrom, tokenTo) {
+  specs.push(
+    {
+      from: tokenFrom,
+      to: tokenFrom + 1,
+      decoration: import_view2.Decoration.mark({ class: "verse-marker-bracket" }),
+      atomic: false
+    },
+    {
+      from: tokenFrom + 1,
+      to: tokenTo - 1,
+      decoration: import_view2.Decoration.mark({ class: "verse-marker" }),
+      atomic: false
+    },
+    {
+      from: tokenTo - 1,
+      to: tokenTo,
+      decoration: import_view2.Decoration.mark({ class: "verse-marker-bracket" }),
+      atomic: false
+    }
+  );
+}
+function collectDecorationSpecs(view) {
   const doc = view.state.doc;
   const fullText = doc.toString();
   const highlights = findHighlightRanges(fullText);
@@ -1952,26 +2009,31 @@ function collectDecorations(view) {
           specs.push({
             from: breakFrom + 1,
             to: breakTo - 1,
-            className: "verse-marker"
+            decoration: import_view2.Decoration.mark({ class: "verse-marker" }),
+            atomic: false
           });
         } else {
-          specs.push(
-            { from: breakFrom, to: breakFrom + 1, className: "verse-marker-bracket" },
-            { from: breakFrom + 1, to: breakTo - 1, className: "verse-marker" },
-            { from: breakTo - 1, to: breakTo, className: "verse-marker-bracket" }
-          );
+          pushBracketLabelMarks(specs, breakFrom, breakTo);
         }
         pos = breakTo;
         continue;
       }
       const matchFrom = markerIdx;
       const matchTo = markerIdx + m[0].length;
-      if (markerInsideHighlight(matchFrom, matchTo, highlights)) {
+      const beforeFootnote = isFollowedByFootnoteRef(fullText, matchTo);
+      if (beforeFootnote) {
         specs.push({
-          from: matchFrom + 1,
-          to: matchTo - 1,
-          className: "verse-marker"
+          from: matchFrom,
+          to: matchTo,
+          decoration: import_view2.Decoration.replace({
+            widget: new VerseMarkerWidget(verseMarkerLabel2(m[0])),
+            inclusive: false,
+            block: false
+          }),
+          atomic: true
         });
+      } else {
+        pushBracketLabelMarks(specs, matchFrom, matchTo);
       }
       pos = matchTo;
     }
@@ -1980,26 +2042,45 @@ function collectDecorations(view) {
   return specs;
 }
 function buildDecorations(view) {
-  const builder = new import_state2.RangeSetBuilder();
-  for (const { from, to, className } of collectDecorations(view)) {
-    builder.add(from, to, import_view2.Decoration.mark({ class: className }));
+  const specs = collectDecorationSpecs(view);
+  const allBuilder = new import_state2.RangeSetBuilder();
+  const atomicBuilder = new import_state2.RangeSetBuilder();
+  for (const { from, to, decoration, atomic } of specs) {
+    allBuilder.add(from, to, decoration);
+    if (atomic)
+      atomicBuilder.add(from, to, decoration);
   }
-  return builder.finish();
+  return {
+    all: allBuilder.finish(),
+    atomic: atomicBuilder.finish()
+  };
 }
 var VerseMarkerLivePreviewPlugin = class {
   constructor(view) {
-    this.decorations = buildDecorations(view);
+    const built = buildDecorations(view);
+    this.decorations = built.all;
+    this.atomicDeco = built.atomic;
   }
   update(update) {
     if (update.docChanged || update.viewportChanged) {
-      this.decorations = buildDecorations(update.view);
+      const built = buildDecorations(update.view);
+      this.decorations = built.all;
+      this.atomicDeco = built.atomic;
     }
   }
 };
 function verseMarkerLivePreviewExtension() {
-  return import_view2.ViewPlugin.fromClass(VerseMarkerLivePreviewPlugin, {
-    decorations: (plugin) => plugin.decorations
+  let plugin;
+  plugin = import_view2.ViewPlugin.fromClass(VerseMarkerLivePreviewPlugin, {
+    decorations: (p) => p.decorations,
+    provide: () => import_view2.EditorView.atomicRanges.of(
+      (view) => {
+        var _a, _b;
+        return (_b = (_a = view.plugin(plugin)) == null ? void 0 : _a.atomicDeco) != null ? _b : import_view2.Decoration.none;
+      }
+    )
   });
+  return plugin;
 }
 
 // src/settings.ts
