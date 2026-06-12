@@ -42,6 +42,7 @@ import {
 } from "./detection";
 import { collectVerseAnchors } from "./postprocessor";
 import { convertHighlightSyntaxToHtml } from "./highlights";
+import { flashVerseSegmentsInEditor } from "./flashLivePreview";
 import type VerseMarkersPlugin from "./main";
 
 /** Converts a single lowercase letter "a".."z" to a zero-based index. */
@@ -701,10 +702,12 @@ export async function resolveVerseLink(
   // already have the anchor in the DOM. This gives the smooth direct-
   // to-center motion in the fast path while still supporting cold loads
   // and far-off mobile virtualized targets.
-  const sameFileOpen =
-    leaf.view instanceof MarkdownView && leaf.view.file === file;
+  const mdView = leaf.view instanceof MarkdownView ? leaf.view : null;
+  const isLivePreview = mdView?.getMode() === "source";
+  const sameFileOpen = mdView?.file === file;
   const anchorAlreadyMounted =
     sameFileOpen &&
+    !isLivePreview &&
     (activeDocument.getElementById(primaryId) !== null ||
       activeDocument.getElementById(fallbackId) !== null);
   const needForcedScroll = !anchorAlreadyMounted && targetLine !== null;
@@ -744,49 +747,33 @@ export async function resolveVerseLink(
     scrollableView.applyScroll?.(targetLine);
   }
 
-  // Wait for the verse anchor to actually exist in the rendered DOM
-  // instead of guessing with a fixed timeout. The reading view's markdown
-  // postprocessor runs asynchronously after openFile() resolves, and the
-  // delay varies per platform — desktop is typically <50ms, but mobile
-  // (iOS/iPadOS) can take several hundred ms on larger notes. A
-  // MutationObserver lets us run as soon as the anchor exists while still
-  // capping the total wait so we don't hang forever on a missing verse.
-  const anchor =
-    (await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) ??
-    activeDocument.getElementById(fallbackId);
-  if (anchor) {
-    // We deliberately avoid Element.scrollIntoView({block: "center"}). Two
-    // problems made it unreliable in our setup:
-    //
-    //   1. It SHORT-CIRCUITS when the browser already considers the
-    //      element "sufficiently visible". WebKit (iOS/iPadOS) is
-    //      especially aggressive: after Obsidian's eState parks the
-    //      verse at the top of the viewport, scrollIntoView({center})
-    //      sometimes does nothing because the element is technically
-    //      visible — and the verse stays at the top.
-    //
-    //   2. It LOSES RACES to async scroll commands fired by Obsidian
-    //      (e.g. eState's smooth scroll, which can land after openFile
-    //      resolves). The browser treats the latest scroll call as
-    //      authoritative, but it's hard to guarantee ours runs last.
-    //
-    // smoothScrollAnchorToCenter computes the target offset and uses
-    // scrollTo, which never short-circuits. It also cancels any
-    // in-flight smooth scroll before issuing ours so it can't be
-    // overwritten.
-    //
-    // We wait one animation frame before scrolling so any rAF-scheduled
-    // scroll command from eState (Obsidian commonly queues its scroll
-    // for the next frame after openFile resolves) has already committed.
-    // After that frame, our cancel-then-scroll sequence is guaranteed
-    // to be the last writer and wins deterministically.
+  if (isLivePreview && mdView) {
+    // Live Preview: scroll the CM6 editor, then flash via decorations (not DOM
+    // spans — those are destroyed on the next CM update).
     window.requestAnimationFrame(() => {
-      if (activeDocument.body.contains(anchor)) {
-        smoothScrollAnchorToCenter(anchor);
+      if (targetLine !== null) {
+        const pos = { line: targetLine, ch: 0 };
+        mdView.editor.setCursor(pos);
+        mdView.editor.scrollIntoView({ from: pos, to: pos }, true);
       }
+      const docText =
+        mdView.file === file ? mdView.editor.getValue() : content;
+      flashVerseSegmentsInEditor(mdView.editor, docText, flashSegments);
     });
+  } else {
+    // Reading view: wait for post-processor verse anchors, then flash DOM text.
+    const anchor =
+      (await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) ??
+      activeDocument.getElementById(fallbackId);
+    if (anchor) {
+      window.requestAnimationFrame(() => {
+        if (activeDocument.body.contains(anchor)) {
+          smoothScrollAnchorToCenter(anchor);
+        }
+      });
+    }
+    flashVerseSegments(flashSegments);
   }
-  flashVerseSegments(flashSegments);
 
   return true;
 }

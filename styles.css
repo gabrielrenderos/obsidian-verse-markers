@@ -207,6 +207,18 @@
   background-color: var(--text-highlight-bg);
 }
 
+/* Live Preview: navigation flash via CM6 mark decorations (flashLivePreview.ts). */
+.markdown-source-view.mod-cm6 .verse-flash-cm {
+  background-color: transparent;
+  border-radius: 0.18em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  transition: background-color 220ms ease-in-out;
+}
+.markdown-source-view.mod-cm6 .verse-flash-cm-active {
+  background-color: var(--text-highlight-bg);
+}
+
 /* Note: Obsidian's native scroll-flash is suppressed at the JS layer
  * (suppressNativeFlashFor in references.ts). That approach actively
  * strips the native flash class the moment Obsidian applies it, so we

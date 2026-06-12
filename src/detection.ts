@@ -447,6 +447,54 @@ function findVerseSpan(
 }
 
 /**
+ * Source offsets for verse-mode spans between `[//]` toggles in `[from, to)`.
+ * Editorial gaps are omitted (for navigation flash in Live Preview).
+ */
+function verseModeSourceIntervals(
+  text: string,
+  from: number,
+  to: number
+): Array<{ from: number; to: number }> {
+  const out: Array<{ from: number; to: number }> = [];
+  let inVerse = true;
+  let pos = from;
+  while (pos < to) {
+    const br = findVerseBreakIndex(text, pos);
+    if (br === -1 || br >= to) {
+      if (inVerse && pos < to && /\S/.test(text.slice(pos, to))) {
+        out.push({ from: pos, to });
+      }
+      break;
+    }
+    if (inVerse && br > pos && /\S/.test(text.slice(pos, br))) {
+      out.push({ from: pos, to: br });
+    }
+    inVerse = !inVerse;
+    pos = br + VERSE_BREAK_TOKEN.length;
+  }
+  return out;
+}
+
+/**
+ * Character ranges in `text` to flash for a (possibly disjoint) verse
+ * reference. Respects `[//]` editorial toggles; used by Live Preview CM6 flash.
+ */
+export function getVerseFlashSourceRanges(
+  text: string,
+  segments: VerseSegment[]
+): Array<{ from: number; to: number }> {
+  const out: Array<{ from: number; to: number }> = [];
+  for (const seg of segments) {
+    for (let n = seg.start; n <= seg.end; n++) {
+      const span = findVerseSpan(text, n);
+      if (!span) continue;
+      out.push(...verseModeSourceIntervals(text, span.start, span.end));
+    }
+  }
+  return out;
+}
+
+/**
  * Returns the heading-split parts of a verse as an ordered array
  * (index 0 = "a", 1 = "b", …). Parts may be empty strings.
  * Returns null if the verse is not found or is malformed.

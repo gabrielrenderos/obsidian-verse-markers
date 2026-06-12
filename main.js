@@ -285,6 +285,38 @@ function findVerseSpan(text, verseNumber) {
     return null;
   return { start: spanStart, end: spanEnd };
 }
+function verseModeSourceIntervals(text, from, to) {
+  const out = [];
+  let inVerse = true;
+  let pos = from;
+  while (pos < to) {
+    const br = findVerseBreakIndex(text, pos);
+    if (br === -1 || br >= to) {
+      if (inVerse && pos < to && /\S/.test(text.slice(pos, to))) {
+        out.push({ from: pos, to });
+      }
+      break;
+    }
+    if (inVerse && br > pos && /\S/.test(text.slice(pos, br))) {
+      out.push({ from: pos, to: br });
+    }
+    inVerse = !inVerse;
+    pos = br + VERSE_BREAK_TOKEN.length;
+  }
+  return out;
+}
+function getVerseFlashSourceRanges(text, segments) {
+  const out = [];
+  for (const seg of segments) {
+    for (let n = seg.start; n <= seg.end; n++) {
+      const span = findVerseSpan(text, n);
+      if (!span)
+        continue;
+      out.push(...verseModeSourceIntervals(text, span.start, span.end));
+    }
+  }
+  return out;
+}
 function getVerseParts(text, verseNumber) {
   const span = findVerseSpan(text, verseNumber);
   if (!span)
@@ -1024,6 +1056,77 @@ function convertHighlightInParagraph(paragraph) {
   return result;
 }
 
+// src/flashLivePreview.ts
+var import_state = require("@codemirror/state");
+var import_view = require("@codemirror/view");
+var FLASH_FADE_MS = 220;
+var FLASH_HOLD_MS = 2e3;
+var setVerseFlashEffect = import_state.StateEffect.define();
+var verseFlashField = import_state.StateField.define({
+  create() {
+    return import_view.Decoration.none;
+  },
+  update(deco, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setVerseFlashEffect)) {
+        if (!e.value || e.value.ranges.length === 0)
+          return import_view.Decoration.none;
+        const cls = e.value.phase === "active" ? "verse-flash-cm verse-flash-cm-active" : "verse-flash-cm";
+        const builder = new import_state.RangeSetBuilder();
+        for (const r of e.value.ranges) {
+          if (r.to > r.from) {
+            builder.add(r.from, r.to, import_view.Decoration.mark({ class: cls }));
+          }
+        }
+        return builder.finish();
+      }
+    }
+    return deco.map(tr.changes);
+  },
+  provide: (f) => import_view.EditorView.decorations.from(f)
+});
+function verseFlashExtension() {
+  return verseFlashField;
+}
+var flashTimer = null;
+function editorView(editor) {
+  const cm = editor.cm;
+  return cm != null ? cm : null;
+}
+function clearLivePreviewFlash(editor) {
+  if (flashTimer !== null) {
+    window.clearTimeout(flashTimer);
+    flashTimer = null;
+  }
+  const view = editorView(editor);
+  if (!view)
+    return;
+  view.dispatch({ effects: setVerseFlashEffect.of(null) });
+}
+function flashVerseSegmentsInEditor(editor, content, segments) {
+  const view = editorView(editor);
+  if (!view)
+    return;
+  const ranges = getVerseFlashSourceRanges(content, segments);
+  if (ranges.length === 0)
+    return;
+  clearLivePreviewFlash(editor);
+  const dispatch = (phase) => {
+    view.dispatch({ effects: setVerseFlashEffect.of({ ranges, phase }) });
+  };
+  dispatch("inactive");
+  window.requestAnimationFrame(() => {
+    dispatch("active");
+    flashTimer = window.setTimeout(() => {
+      dispatch("inactive");
+      flashTimer = window.setTimeout(() => {
+        view.dispatch({ effects: setVerseFlashEffect.of(null) });
+        flashTimer = null;
+      }, FLASH_FADE_MS);
+    }, FLASH_HOLD_MS);
+  });
+}
+
 // src/references.ts
 function partToIndex2(part) {
   return part.charCodeAt(0) - "a".charCodeAt(0);
@@ -1370,8 +1473,10 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
   const primaryId = startPart ? `verse-${startVerse}${startPart}` : `verse-${startVerse}`;
   const firstPart = firstFragmentPart(content, startVerse);
   const fallbackId = !startPart && firstPart ? `verse-${startVerse}${firstPart}` : `verse-${startVerse}`;
-  const sameFileOpen = leaf.view instanceof import_obsidian2.MarkdownView && leaf.view.file === file;
-  const anchorAlreadyMounted = sameFileOpen && (activeDocument.getElementById(primaryId) !== null || activeDocument.getElementById(fallbackId) !== null);
+  const mdView = leaf.view instanceof import_obsidian2.MarkdownView ? leaf.view : null;
+  const isLivePreview = (mdView == null ? void 0 : mdView.getMode()) === "source";
+  const sameFileOpen = (mdView == null ? void 0 : mdView.file) === file;
+  const anchorAlreadyMounted = sameFileOpen && !isLivePreview && (activeDocument.getElementById(primaryId) !== null || activeDocument.getElementById(fallbackId) !== null);
   const needForcedScroll = !anchorAlreadyMounted && targetLine !== null;
   const openState = needForcedScroll && targetLine !== null ? { eState: { line: targetLine } } : void 0;
   if (needForcedScroll) {
@@ -1382,15 +1487,27 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
     const scrollableView = leaf.view;
     (_a = scrollableView.applyScroll) == null ? void 0 : _a.call(scrollableView, targetLine);
   }
-  const anchor = (_b = await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) != null ? _b : activeDocument.getElementById(fallbackId);
-  if (anchor) {
+  if (isLivePreview && mdView) {
     window.requestAnimationFrame(() => {
-      if (activeDocument.body.contains(anchor)) {
-        smoothScrollAnchorToCenter(anchor);
+      if (targetLine !== null) {
+        const pos = { line: targetLine, ch: 0 };
+        mdView.editor.setCursor(pos);
+        mdView.editor.scrollIntoView({ from: pos, to: pos }, true);
       }
+      const docText = mdView.file === file ? mdView.editor.getValue() : content;
+      flashVerseSegmentsInEditor(mdView.editor, docText, flashSegments);
     });
+  } else {
+    const anchor = (_b = await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) != null ? _b : activeDocument.getElementById(fallbackId);
+    if (anchor) {
+      window.requestAnimationFrame(() => {
+        if (activeDocument.body.contains(anchor)) {
+          smoothScrollAnchorToCenter(anchor);
+        }
+      });
+    }
+    flashVerseSegments(flashSegments);
   }
-  flashVerseSegments(flashSegments);
   return true;
 }
 var ANCHOR_WAIT_TIMEOUT_MS = 1500;
@@ -1499,17 +1616,17 @@ function waitForElementById(id, timeoutMs) {
     }, timeoutMs);
   });
 }
-var FLASH_FADE_MS = 220;
-var FLASH_HOLD_MS = 2e3;
+var FLASH_FADE_MS2 = 220;
+var FLASH_HOLD_MS2 = 2e3;
 var activeFlashSpans = [];
-var flashTimer = null;
+var flashTimer2 = null;
 function flashVerseSegments(segments) {
   const flashRanges = buildVerseFlashRanges(segments);
   if (flashRanges.length === 0)
     return;
-  if (flashTimer !== null) {
-    window.clearTimeout(flashTimer);
-    flashTimer = null;
+  if (flashTimer2 !== null) {
+    window.clearTimeout(flashTimer2);
+    flashTimer2 = null;
   }
   unwrapFlashSpans();
   const spans = [];
@@ -1532,15 +1649,15 @@ function flashVerseSegments(segments) {
     for (const s of spans)
       s.classList.add("verse-flash-active");
   });
-  flashTimer = window.setTimeout(() => {
+  flashTimer2 = window.setTimeout(() => {
     for (const s of spans)
       s.classList.remove("verse-flash-active");
-    flashTimer = window.setTimeout(() => {
+    flashTimer2 = window.setTimeout(() => {
       if (activeFlashSpans === spans)
         unwrapFlashSpans();
-      flashTimer = null;
-    }, FLASH_FADE_MS);
-  }, FLASH_HOLD_MS);
+      flashTimer2 = null;
+    }, FLASH_FADE_MS2);
+  }, FLASH_HOLD_MS2);
 }
 function wrapRangeWithSpans(range, className) {
   const spans = [];
@@ -1807,8 +1924,8 @@ function registerVerseEmbeds(plugin) {
 }
 
 // src/livePreview.ts
-var import_view = require("@codemirror/view");
-var import_state = require("@codemirror/state");
+var import_view2 = require("@codemirror/view");
+var import_state2 = require("@codemirror/state");
 function markerInsideHighlight(from, to, highlights) {
   return highlights.some((h) => from >= h.start && to <= h.end);
 }
@@ -1863,9 +1980,9 @@ function collectDecorations(view) {
   return specs;
 }
 function buildDecorations(view) {
-  const builder = new import_state.RangeSetBuilder();
+  const builder = new import_state2.RangeSetBuilder();
   for (const { from, to, className } of collectDecorations(view)) {
-    builder.add(from, to, import_view.Decoration.mark({ class: className }));
+    builder.add(from, to, import_view2.Decoration.mark({ class: className }));
   }
   return builder.finish();
 }
@@ -1880,7 +1997,7 @@ var VerseMarkerLivePreviewPlugin = class {
   }
 };
 function verseMarkerLivePreviewExtension() {
-  return import_view.ViewPlugin.fromClass(VerseMarkerLivePreviewPlugin, {
+  return import_view2.ViewPlugin.fromClass(VerseMarkerLivePreviewPlugin, {
     decorations: (plugin) => plugin.decorations
   });
 }
@@ -1949,7 +2066,10 @@ var VerseMarkersPlugin = class extends import_obsidian5.Plugin {
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new VerseMarkersSettingTab(this.app, this));
-    this.registerEditorExtension(verseMarkerLivePreviewExtension());
+    this.registerEditorExtension([
+      verseMarkerLivePreviewExtension(),
+      verseFlashExtension()
+    ]);
     this.registerMarkdownPostProcessor((el, ctx) => {
       versePostProcessor(el, ctx);
       this.wireVerseAnchors(el);

@@ -24,6 +24,7 @@ import { versePostProcessor, collectVerseAnchors } from "./postprocessor";
 import { registerCommands } from "./commands";
 import { resolveVerseLink, registerVersePagePreview } from "./references";
 import { registerVerseEmbeds } from "./embeds";
+import { verseFlashExtension } from "./flashLivePreview";
 import { verseMarkerLivePreviewExtension } from "./livePreview";
 import {
   VerseMarkersSettings,
@@ -45,7 +46,10 @@ export default class VerseMarkersPlugin extends Plugin {
 
     // Live Preview: one CM6 wrapper per ==highlight== interior so theme chrome
     // (incl. dotted underlines) stays continuous across [N] markers.
-    this.registerEditorExtension(verseMarkerLivePreviewExtension());
+    this.registerEditorExtension([
+      verseMarkerLivePreviewExtension(),
+      verseFlashExtension(),
+    ]);
 
     // Reading view post-processor: rewrites [N] text → spans, injects
     // part-b/c/… continuation anchors for heading-split verses, and wires
