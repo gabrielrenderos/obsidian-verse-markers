@@ -20,7 +20,7 @@ import {
   ViewPlugin,
   WidgetType,
 } from "@codemirror/view";
-import { RangeSetBuilder } from "@codemirror/state";
+import { RangeSetBuilder, StateEffect } from "@codemirror/state";
 import {
   execVerseMarker,
   findVerseBreakIndex,
@@ -30,15 +30,26 @@ import {
   VERSE_BREAK_TOKEN,
 } from "./detection";
 import { findHighlightRanges, type HighlightRange } from "./highlights";
+import {
+  flashClassesForWidget,
+  setVerseFlashEffect,
+} from "./flashLivePreview";
 
 /** Renders `[N]` with visible brackets when a footnote ref would swallow it. */
 class VerseMarkerWidget extends WidgetType {
-  constructor(readonly label: string) {
+  constructor(
+    readonly label: string,
+    readonly flashClass: string
+  ) {
     super();
   }
 
   eq(other: WidgetType): boolean {
-    return other instanceof VerseMarkerWidget && other.label === this.label;
+    return (
+      other instanceof VerseMarkerWidget &&
+      other.label === this.label &&
+      other.flashClass === this.flashClass
+    );
   }
 
   /** Pass clicks/edits through; footnote `[^1]` after the widget stays interactive. */
@@ -48,7 +59,9 @@ class VerseMarkerWidget extends WidgetType {
 
   toDOM(): HTMLElement {
     const wrap = document.createElement("span");
-    wrap.className = "verse-marker-widget";
+    wrap.className = ["verse-marker-widget", this.flashClass]
+      .filter(Boolean)
+      .join(" ");
     const open = document.createElement("span");
     open.className = "verse-marker-bracket";
     open.textContent = "[";
@@ -165,7 +178,10 @@ function collectDecorationSpecs(
           from: matchFrom,
           to: matchTo,
           decoration: Decoration.replace({
-            widget: new VerseMarkerWidget(verseMarkerLabel(m![0])),
+            widget: new VerseMarkerWidget(
+              verseMarkerLabel(m![0]),
+              flashClassesForWidget(matchFrom, matchTo)
+            ),
             inclusive: false,
             block: false,
           }),
@@ -197,6 +213,15 @@ function buildDecorations(view: EditorView): BuiltDecorations {
   };
 }
 
+function transactionHasFlashChange(tr: {
+  effects: readonly StateEffect<unknown>[];
+}): boolean {
+  for (const e of tr.effects) {
+    if (e.is(setVerseFlashEffect)) return true;
+  }
+  return false;
+}
+
 class VerseMarkerLivePreviewPlugin {
   decorations: DecorationSet;
   atomicDeco: DecorationSet;
@@ -210,9 +235,11 @@ class VerseMarkerLivePreviewPlugin {
   update(update: {
     docChanged: boolean;
     viewportChanged: boolean;
+    transactions: readonly { effects: readonly StateEffect<unknown>[] }[];
     view: EditorView;
   }): void {
-    if (update.docChanged || update.viewportChanged) {
+    const flashChanged = update.transactions.some(transactionHasFlashChange);
+    if (update.docChanged || update.viewportChanged || flashChanged) {
       const built = buildDecorations(update.view);
       this.decorations = built.all;
       this.atomicDeco = built.atomic;

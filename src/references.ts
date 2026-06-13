@@ -24,8 +24,10 @@ import {
   MarkdownRenderer,
   MarkdownView,
   TFile,
+  WorkspaceLeaf,
   setIcon,
   type HoverParent,
+  type OpenViewState,
 } from "obsidian";
 import {
   appendMissingFootnoteDefinitions,
@@ -43,6 +45,12 @@ import {
 import { collectVerseAnchors } from "./postprocessor";
 import { convertHighlightSyntaxToHtml } from "./highlights";
 import { flashVerseSegmentsInEditor } from "./flashLivePreview";
+import {
+  scrollEditorWithoutFlash,
+  scrollReadingViewToLine,
+  setVerseHighlightActive,
+} from "./nativeFlash";
+import { notifyVerseHighlightShown } from "./highlightDismiss";
 import type VerseMarkersPlugin from "./main";
 
 /** Converts a single lowercase letter "a".."z" to a zero-based index. */
@@ -390,6 +398,48 @@ export function registerVersePagePreview(plugin: VerseMarkersPlugin): void {
 }
 
 /**
+ * Routes verse-fragment link clicks through `resolveVerseLink` so Live Preview
+ * direct clicks get the CM6 verse flash (not only hover-popover navigation).
+ */
+export function registerVerseLinkNavigation(plugin: VerseMarkersPlugin): void {
+  const { workspace } = plugin.app;
+  const original = workspace.openLinkText.bind(workspace);
+
+  workspace.openLinkText = async (
+    linktext: string,
+    sourcePath: string,
+    newLeaf?: boolean,
+    openViewState?: OpenViewState
+  ): Promise<void> => {
+    const allowShorthand = plugin.settings.enableShorthandSyntax;
+    const fragment = verseFragmentOf(linktext, allowShorthand);
+    if (fragment) {
+      const hashIdx = linktext.indexOf("#");
+      const filePart = linktext.slice(0, hashIdx);
+      const file = plugin.app.metadataCache.getFirstLinkpathDest(
+        filePart,
+        sourcePath
+      );
+      if (file instanceof TFile) {
+        const handled = await resolveVerseLink(
+          plugin.app,
+          file,
+          fragment,
+          allowShorthand,
+          { newLeaf }
+        );
+        if (handled) return;
+      }
+    }
+    return original(linktext, sourcePath, newLeaf, openViewState);
+  };
+
+  plugin.register(() => {
+    workspace.openLinkText = original;
+  });
+}
+
+/**
  * Opens a verse hover popover for `linktext` anchored at `targetEl`, parented
  * to `hoverParent` so Obsidian links it into the popover chain.
  */
@@ -645,11 +695,55 @@ function wirePopoverAnchors(
  *   - "verse-Na"  → id="verse-Na" if present, else id="verse-N"
  *   - "verse-N:M" → id="verse-N"
  */
+export interface ResolveVerseLinkOptions {
+  newLeaf?: boolean;
+}
+
+function markdownViewForFile(
+  app: App,
+  leaf: WorkspaceLeaf,
+  file: TFile
+): MarkdownView | null {
+  if (leaf.view instanceof MarkdownView && leaf.view.file === file) {
+    return leaf.view;
+  }
+  const active = app.workspace.getActiveViewOfType(MarkdownView);
+  if (active?.file === file) return active;
+  return null;
+}
+
+function readingPreviewRoot(view: MarkdownView): HTMLElement {
+  return (
+    view.containerEl.querySelector<HTMLElement>(".markdown-preview-view") ??
+    view.contentEl
+  );
+}
+
+function verseAnchorIn(root: ParentNode, id: string): HTMLElement | null {
+  try {
+    return root.querySelector<HTMLElement>(`#${CSS.escape(id)}`);
+  } catch {
+    return root.querySelector<HTMLElement>(`#${id}`);
+  }
+}
+
+function verseAnchorMounted(
+  root: ParentNode,
+  primaryId: string,
+  fallbackId: string
+): boolean {
+  return (
+    verseAnchorIn(root, primaryId) !== null ||
+    verseAnchorIn(root, fallbackId) !== null
+  );
+}
+
 export async function resolveVerseLink(
   app: App,
   file: TFile,
   fragment: string,
-  allowShorthand: boolean = false
+  allowShorthand: boolean = false,
+  options?: ResolveVerseLinkOptions
 ): Promise<boolean> {
   const segments = parseVerseSegments(fragment, allowShorthand);
   if (!segments || segments.length === 0) return false;
@@ -657,7 +751,10 @@ export async function resolveVerseLink(
   let startVerse = segments[0].start;
   let startPart = segments[0].startPart;
 
-  const leaf = app.workspace.getMostRecentLeaf();
+  const activeMd = app.workspace.getActiveViewOfType(MarkdownView);
+  const leaf = options?.newLeaf
+    ? app.workspace.getLeaf(true)
+    : activeMd?.leaf ?? app.workspace.getMostRecentLeaf();
   if (!leaf) return false;
 
   // Pre-compute the verse's source line and anchor IDs once so we can
@@ -690,89 +787,94 @@ export async function resolveVerseLink(
   const fallbackId =
     !startPart && firstPart ? `verse-${startVerse}${firstPart}` : `verse-${startVerse}`;
 
-  // Decide whether to ask Obsidian to pre-scroll via eState. eState is
-  // necessary when the verse anchor isn't currently rendered (Obsidian's
-  // reading view virtualizes far-off chunks; without forcing a render,
-  // the anchor never exists). But it has a side effect: eState parks
-  // the verse at the TOP of the viewport, then our scrollIntoView would
-  // need a second pass to re-center — visibly jarring in fast cases
-  // where the anchor was already on screen.
-  //
-  // So: skip eState (and its sibling applyScroll forced render) when we
-  // already have the anchor in the DOM. This gives the smooth direct-
-  // to-center motion in the fast path while still supporting cold loads
-  // and far-off mobile virtualized targets.
-  const mdView = leaf.view instanceof MarkdownView ? leaf.view : null;
-  const isLivePreview = mdView?.getMode() === "source";
-  const sameFileOpen = mdView?.file === file;
+  // Decide whether we need a scroll-only jump after open. Reading-view
+  // anchors that are already mounted get smoothScrollAnchorToCenter; cold
+  // targets use applyScroll (scroll only — no native flash). Never pass
+  // eState.line on openFile: Obsidian flashes the block when opening with it.
+  const mdViewBefore = leaf.view instanceof MarkdownView ? leaf.view : null;
+  const isLivePreviewBefore =
+    mdViewBefore?.getMode() === "source" && mdViewBefore.file === file;
+  const sameFileOpen = mdViewBefore?.file === file;
   const anchorAlreadyMounted =
     sameFileOpen &&
-    !isLivePreview &&
-    (activeDocument.getElementById(primaryId) !== null ||
-      activeDocument.getElementById(fallbackId) !== null);
+    !isLivePreviewBefore &&
+    mdViewBefore !== null &&
+    verseAnchorMounted(
+      readingPreviewRoot(mdViewBefore),
+      primaryId,
+      fallbackId
+    );
   const needForcedScroll = !anchorAlreadyMounted && targetLine !== null;
 
-  const openState: { eState?: { line: number } } | undefined =
-    needForcedScroll && targetLine !== null
-      ? { eState: { line: targetLine } }
-      : undefined;
+  setVerseHighlightActive(true);
 
-  // Suppress Obsidian's native scroll-flash for the duration of this
-  // navigation. eState: { line } both scrolls the preview AND triggers
-  // Obsidian's own block-flash on the target — which visibly overlaps
-  // with our custom verse-range flash. The observer actively strips the
-  // native flash classes the moment Obsidian tries to apply them, and
-  // is scoped to this navigation only so unrelated native flashes still
-  // fire normally. Only armed when eState is actually used, since
-  // Obsidian's flash is what eState triggers.
-  if (needForcedScroll) {
-    suppressNativeFlashFor(NATIVE_FLASH_SUPPRESS_MS);
-  }
+  // Do not pass eState.line — Obsidian flashes the block when opening with it.
+  await leaf.openFile(file);
 
-  await leaf.openFile(file, openState);
+  const mdView = markdownViewForFile(app, leaf, file);
+  const isLivePreview = mdView?.getMode() === "source";
 
-  // Belt-and-suspenders applyScroll only on the cold path. We need it
-  // there for the same-file case where openFile may not re-apply eState
-  // because the file was already open. On the warm path (anchor already
-  // mounted) calling applyScroll would re-park the verse at the top and
-  // cancel the "smooth direct-to-center" feel of the warm navigation.
-  if (
-    needForcedScroll &&
-    targetLine !== null &&
-    leaf.view instanceof MarkdownView
-  ) {
-    const scrollableView = leaf.view as unknown as {
-      applyScroll?: (scroll: number) => void;
-    };
-    scrollableView.applyScroll?.(targetLine);
+  if (needForcedScroll && targetLine !== null && mdView && isLivePreview) {
+    const pos = { line: targetLine, ch: 0 };
+    mdView.editor.setCursor(pos);
+    scrollEditorWithoutFlash(mdView.editor, { from: pos, to: pos }, true);
   }
 
   if (isLivePreview && mdView) {
     // Live Preview: scroll the CM6 editor, then flash via decorations (not DOM
-    // spans — those are destroyed on the next CM update).
-    window.requestAnimationFrame(() => {
+    // spans — those are destroyed on the next CM update). Double rAF so scroll
+    // and openFile layout settle before we measure source ranges.
+    const runFlash = (): void => {
       if (targetLine !== null) {
         const pos = { line: targetLine, ch: 0 };
         mdView.editor.setCursor(pos);
-        mdView.editor.scrollIntoView({ from: pos, to: pos }, true);
+        scrollEditorWithoutFlash(mdView.editor, { from: pos, to: pos }, true);
       }
-      const docText =
-        mdView.file === file ? mdView.editor.getValue() : content;
-      flashVerseSegmentsInEditor(mdView.editor, docText, flashSegments);
+      flashVerseSegmentsInEditor(
+        mdView.editor,
+        mdView.editor.getValue(),
+        flashSegments
+      );
+    };
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(runFlash);
     });
-  } else {
-    // Reading view: wait for post-processor verse anchors, then flash DOM text.
-    const anchor =
-      (await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) ??
-      activeDocument.getElementById(fallbackId);
+  } else if (mdView) {
+    // Reading view: scope anchor lookup and flash to THIS preview pane only.
+    // `getElementById` is document-wide and can match a hidden split leaf,
+    // which makes scroll/flash appear to do nothing in the active pane.
+    const previewRoot = readingPreviewRoot(mdView);
+
+    if (targetLine !== null && needForcedScroll) {
+      await scrollReadingViewToLine(mdView, targetLine);
+    }
+
+    let anchor =
+      (await waitForElementById(
+        primaryId,
+        ANCHOR_WAIT_TIMEOUT_MS,
+        previewRoot
+      )) ?? verseAnchorIn(previewRoot, fallbackId);
+
+    if (!anchor && targetLine !== null) {
+      await scrollReadingViewToLine(mdView, targetLine);
+      anchor =
+        (await waitForElementById(
+          primaryId,
+          ANCHOR_WAIT_TIMEOUT_MS,
+          previewRoot
+        )) ?? verseAnchorIn(previewRoot, fallbackId);
+    }
+
     if (anchor) {
+      const scrollTarget = anchor;
       window.requestAnimationFrame(() => {
-        if (activeDocument.body.contains(anchor)) {
-          smoothScrollAnchorToCenter(anchor);
+        if (previewRoot.contains(scrollTarget)) {
+          smoothScrollAnchorToCenter(scrollTarget);
         }
       });
     }
-    flashVerseSegments(flashSegments);
+    flashVerseSegments(flashSegments, previewRoot);
   }
 
   return true;
@@ -868,96 +970,6 @@ function smoothScrollAnchorToCenter(anchor: HTMLElement): void {
 }
 
 /**
- * How long the native scroll-flash suppression stays armed during a verse
- * navigation. Generous: covers slow mobile renders where Obsidian adds the
- * flash class some time after openFile resolves (the class can be applied
- * once the target chunk finally renders, which on a long iCloud-synced
- * note may be well after our own flash starts). Outside this window
- * unrelated native flashes (e.g. backlinks panel) behave normally.
- */
-const NATIVE_FLASH_SUPPRESS_MS = 5000;
-
-/**
- * Class names Obsidian adds to elements when it paints its scroll-flash.
- * `is-flashing` is the canonical one; the others are belt-and-suspenders
- * for theme/version variants we've seen in the wild.
- */
-const NATIVE_FLASH_CLASSES = [
-  "is-flashing",
-  "is-flashing-block",
-  "has-active-flash",
-  "is-flash",
-];
-
-function stripNativeFlashClasses(el: Element): void {
-  for (const cls of NATIVE_FLASH_CLASSES) {
-    if (el.classList.contains(cls)) el.classList.remove(cls);
-  }
-}
-
-/**
- * Actively suppresses Obsidian's native scroll-flash for `durationMs`.
- *
- * A MutationObserver watches document.body for any element gaining one
- * of the native flash class names (or being inserted with one) and
- * removes the class before the browser paints. This is more reliable
- * than a CSS-only override because:
- *   1. It works even if Obsidian's class names change in a future
- *      version (we check a small allowlist; easy to extend).
- *   2. It strips the class outright, so even if the suppression window
- *      ends mid-animation the flash cannot resume.
- *   3. It only runs while WE triggered the navigation — native flashes
- *      from unrelated sources (backlink jumps, search results, normal
- *      heading links, etc.) fire as Obsidian intends.
- *
- * Returns a disposer in case a follow-up navigation needs to disarm
- * early; otherwise the timer disconnects automatically.
- */
-function suppressNativeFlashFor(durationMs: number): () => void {
-  const root = activeDocument.body;
-
-  // Strip anything already flagged before we started — covers the rare
-  // case where the previous navigation's flash hasn't decayed yet.
-  for (const cls of NATIVE_FLASH_CLASSES) {
-    root.querySelectorAll(`.${cls}`).forEach(stripNativeFlashClasses);
-  }
-
-  const observer = new MutationObserver((mutations) => {
-    for (const m of mutations) {
-      if (m.type === "attributes" && m.attributeName === "class") {
-        stripNativeFlashClasses(m.target as Element);
-      } else if (m.type === "childList") {
-        for (const node of Array.from(m.addedNodes)) {
-          if (node.nodeType !== Node.ELEMENT_NODE) continue;
-          const el = node as Element;
-          stripNativeFlashClasses(el);
-          for (const cls of NATIVE_FLASH_CLASSES) {
-            el.querySelectorAll(`.${cls}`).forEach(stripNativeFlashClasses);
-          }
-        }
-      }
-    }
-  });
-
-  observer.observe(root, {
-    attributes: true,
-    attributeFilter: ["class"],
-    childList: true,
-    subtree: true,
-  });
-
-  let disposed = false;
-  const dispose = (): void => {
-    if (disposed) return;
-    disposed = true;
-    observer.disconnect();
-    window.clearTimeout(timer);
-  };
-  const timer = window.setTimeout(dispose, durationMs);
-  return dispose;
-}
-
-/**
  * Resolves with the element matching `id` as soon as it exists in the
  * document, or null if `timeoutMs` elapses without it appearing.
  *
@@ -968,10 +980,14 @@ function suppressNativeFlashFor(durationMs: number): () => void {
  */
 function waitForElementById(
   id: string,
-  timeoutMs: number
+  timeoutMs: number,
+  root: ParentNode
 ): Promise<HTMLElement | null> {
-  const existing = activeDocument.getElementById(id);
+  const existing = verseAnchorIn(root, id);
   if (existing) return Promise.resolve(existing);
+
+  const observeTarget =
+    root instanceof Document ? root.body : (root as Element);
 
   return new Promise((resolve) => {
     let settled = false;
@@ -984,64 +1000,72 @@ function waitForElementById(
     };
 
     const observer = new MutationObserver(() => {
-      const el = activeDocument.getElementById(id);
+      const el = verseAnchorIn(root, id);
       if (el) finish(el);
     });
-    observer.observe(activeDocument.body, { childList: true, subtree: true });
+    observer.observe(observeTarget, { childList: true, subtree: true });
 
     const timer = window.setTimeout(() => {
-      finish(activeDocument.getElementById(id));
+      finish(verseAnchorIn(root, id));
     }, timeoutMs);
   });
 }
 
 /**
- * Flash lifecycle constants. Tuned to feel close to Obsidian's native
- * link-jump highlight: a quick fade in, a comfortable hold, then a fade
- * out before the wrapping spans are removed from the DOM.
+ * Flash lifecycle constants. Fade-out duration when the user dismisses.
  */
 const FLASH_FADE_MS = 220;
-const FLASH_HOLD_MS = 2000;
 
-/** Tracks the currently-wrapped spans so overlapping flashes can clean up. */
+/** Inline content that must not get its own flash wrap (keeps band height even). */
+const FLASH_SKIP_INLINE = "h1,h2,h3,h4,h5,h6,.verse-editorial";
+
+/** Tracks wrapped spans so dismiss can unwrap them. */
 let activeFlashSpans: HTMLSpanElement[] = [];
-let flashTimer: number | null = null;
+let flashFadeTimer: number | null = null;
+
+/** Removes the reading-view verse highlight (optional fade-out). */
+export function clearReadingViewHighlight(fadeOut = true): void {
+  if (flashFadeTimer !== null) {
+    window.clearTimeout(flashFadeTimer);
+    flashFadeTimer = null;
+  }
+
+  const spans = activeFlashSpans;
+  if (spans.length === 0) return;
+
+  if (!fadeOut) {
+    unwrapFlashSpans();
+    if (activeFlashSpans.length === 0) setVerseHighlightActive(false);
+    return;
+  }
+
+  for (const s of spans) s.classList.remove("verse-flash-active");
+
+  flashFadeTimer = window.setTimeout(() => {
+    if (activeFlashSpans === spans) {
+      unwrapFlashSpans();
+      setVerseHighlightActive(false);
+    }
+    flashFadeTimer = null;
+  }, FLASH_FADE_MS);
+}
 
 /**
- * Briefly highlights only the *text* of the verses inside the navigated
- * reference — not their containing blocks. We wrap the text nodes that fall
- * inside each in-range verse's DOM Range with `<span class="verse-flash">`
- * elements, then toggle `.verse-flash-active` to drive a CSS background
- * transition. The rounded-corner / padded look is therefore real CSS box
- * decoration (impossible with the CSS Custom Highlight API, which only
- * accepts color/background-color/text-decoration on `::highlight()`).
- *
- * Works for a single verse, a range, or a disjoint multi-segment reference:
- * each verse that belongs to the reference is highlighted up to (but not
- * including) the next anchor, so verses excluded by a gap (e.g. 7 in
- * 4:6/8:10) are never highlighted. Rounded end-caps are applied per
- * contiguous run, so each highlighted block reads as its own pill.
- *
- * Spans are unwrapped after the fade-out completes so the DOM ends up
- * exactly as it started.
+ * Highlights in-range verse text in reading view via wrapped spans.
  */
-function flashVerseSegments(segments: VerseSegment[]): void {
-  const flashRanges = buildVerseFlashRanges(segments);
+function flashVerseSegments(
+  segments: VerseSegment[],
+  root: ParentNode
+): void {
+  const flashRanges = buildVerseFlashRanges(segments, root);
   if (flashRanges.length === 0) return;
 
-  // Tear down any in-flight previous flash before starting this one.
-  if (flashTimer !== null) {
-    window.clearTimeout(flashTimer);
-    flashTimer = null;
-  }
-  unwrapFlashSpans();
+  clearReadingViewHighlight(false);
 
   const spans: HTMLSpanElement[] = [];
   for (const fr of flashRanges) {
-    const rangeSpans = wrapRangeWithSpans(fr.range, "verse-flash");
+    const rangeSpans = wrapRangeWithSpans(fr.range, "verse-flash", fr.capEnd);
     if (rangeSpans.length > 0) {
-      // Cap a run's outer edges only (the first span of a run-start and the
-      // last span of a run-end) so interior seams stay square and seamless.
       if (fr.capStart) rangeSpans[0].classList.add("verse-flash-start");
       if (fr.capEnd) {
         rangeSpans[rangeSpans.length - 1].classList.add("verse-flash-end");
@@ -1052,34 +1076,19 @@ function flashVerseSegments(segments: VerseSegment[]): void {
   if (spans.length === 0) return;
 
   activeFlashSpans = spans;
+  setVerseHighlightActive(true);
 
-  // Add the active class on the next frame so the browser registers the
-  // initial transparent state first — without the rAF, the transition is
-  // skipped and the highlight pops in instantly.
   window.requestAnimationFrame(() => {
     for (const s of spans) s.classList.add("verse-flash-active");
+    notifyVerseHighlightShown();
   });
-
-  flashTimer = window.setTimeout(() => {
-    for (const s of spans) s.classList.remove("verse-flash-active");
-    flashTimer = window.setTimeout(() => {
-      // Guard: a newer flash may have already replaced our spans.
-      if (activeFlashSpans === spans) unwrapFlashSpans();
-      flashTimer = null;
-    }, FLASH_FADE_MS);
-  }, FLASH_HOLD_MS);
 }
 
-/**
- * Wraps every text node intersecting `range` in `<span class={className}>`.
- * Because our flash ranges always start/end at element boundaries
- * (setStartBefore / setEndBefore on verse anchors), no text node is split
- * mid-character — we just lift each whole text node into a wrapping span.
- *
- * Text nodes are collected first via TreeWalker, then wrapped, so the
- * walker isn't disturbed by the DOM mutation.
- */
-function wrapRangeWithSpans(range: Range, className: string): HTMLSpanElement[] {
+function wrapRangeWithSpans(
+  range: Range,
+  className: string,
+  trimTrailingEnd = false
+): HTMLSpanElement[] {
   const spans: HTMLSpanElement[] = [];
   const ancestor = range.commonAncestorContainer;
   const walkRoot =
@@ -1092,22 +1101,36 @@ function wrapRangeWithSpans(range: Range, className: string): HTMLSpanElement[] 
   while ((cur = walker.nextNode())) {
     const t = cur as Text;
     if (!t.nodeValue || t.nodeValue.length === 0) continue;
-    // Never highlight heading text: headings can act as verse split markers,
-    // but their own label text is section structure, not verse body.
     const owner = t.parentElement;
-    if (owner && owner.closest("h1, h2, h3, h4, h5, h6")) continue;
-    // Skip `[//]` editorial gaps (wrapped by the reading-view post-processor).
-    if (owner && owner.closest(".verse-editorial")) continue;
-    // Skip whitespace-only text nodes (typically structural newlines/indent
-    // sitting between block elements — e.g. between <blockquote> and its
-    // child <p>s). With padding applied, a wrapped whitespace node would
-    // render as a small visible chip above/below adjacent content, which
-    // is what made flashed blockquotes appear to briefly grow taller.
-    if (!/\S/.test(t.nodeValue)) continue;
+    if (owner && owner.closest(FLASH_SKIP_INLINE)) continue;
     if (range.intersectsNode(t)) candidates.push(t);
   }
 
-  for (const node of candidates) {
+  if (trimTrailingEnd) {
+    while (candidates.length > 0) {
+      const last = candidates[candidates.length - 1];
+      if (!last.nodeValue) {
+        candidates.pop();
+        continue;
+      }
+      if (!/\S/.test(last.nodeValue)) {
+        candidates.pop();
+        continue;
+      }
+      const trimmedLen = last.nodeValue.replace(/\s+$/, "").length;
+      if (trimmedLen === 0) {
+        candidates.pop();
+        continue;
+      }
+      if (trimmedLen < last.nodeValue.length) {
+        last.splitText(trimmedLen);
+      }
+      break;
+    }
+  }
+
+  for (let i = 0; i < candidates.length; i++) {
+    const node = candidates[i];
     const parent = node.parentNode;
     if (!parent) continue;
     const span = activeDocument.createElement("span");
@@ -1119,7 +1142,6 @@ function wrapRangeWithSpans(range: Range, className: string): HTMLSpanElement[] 
   return spans;
 }
 
-/** Removes every active flash span, restoring the original DOM structure. */
 function unwrapFlashSpans(): void {
   for (const span of activeFlashSpans) {
     const parent = span.parentNode;
@@ -1159,8 +1181,11 @@ function anchorInSegment(
  * lie in a gap between segments (e.g. 7 in 4:6/8:10) are excluded. Returned in
  * document order — `querySelectorAll` already provides that.
  */
-function collectInSegmentsAnchors(segments: VerseSegment[]): HTMLElement[] {
-  const all = activeDocument.querySelectorAll<HTMLElement>('[id^="verse-"]');
+function collectInSegmentsAnchors(
+  segments: VerseSegment[],
+  root: ParentNode
+): HTMLElement[] {
+  const all = root.querySelectorAll<HTMLElement>('[id^="verse-"]');
   const inRange: HTMLElement[] = [];
   for (let i = 0; i < all.length; i++) {
     const el = all[i];
@@ -1212,12 +1237,13 @@ const FLASH_STOP_HEADING_SELECTORS = ["h1", "h2", "h3", "h4", "h5", "h6"];
 function findFlashStopBetween(
   a: Element,
   b: Element | null,
-  includeHeadings: boolean
+  includeHeadings: boolean,
+  root: ParentNode
 ): Element | null {
   const selectors = includeHeadings
     ? [...FLASH_STOP_FOOTNOTE_SELECTORS, ...FLASH_STOP_HEADING_SELECTORS]
     : FLASH_STOP_FOOTNOTE_SELECTORS;
-  const candidates = activeDocument.querySelectorAll<HTMLElement>(selectors.join(","));
+  const candidates = root.querySelectorAll<HTMLElement>(selectors.join(","));
   for (let i = 0; i < candidates.length; i++) {
     const el = candidates[i];
     if (!(a.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) {
@@ -1257,15 +1283,18 @@ interface FlashRange {
  * between the two anchors. For interior verses, headings stay inside the range
  * so heading-split verses (parts b, c, …) still highlight fully.
  */
-function buildVerseFlashRanges(segments: VerseSegment[]): FlashRange[] {
-  const inRange = collectInSegmentsAnchors(segments);
+function buildVerseFlashRanges(
+  segments: VerseSegment[],
+  root: ParentNode
+): FlashRange[] {
+  const inRange = collectInSegmentsAnchors(segments, root);
   if (inRange.length === 0) return [];
 
   // Need every verse-* anchor in document order to find the immediate
   // next stopping point for each in-range one (the next anchor may itself
   // be out of range — e.g. the verse right after the end of a segment).
   const allValidAnchors: HTMLElement[] = [];
-  const all = activeDocument.querySelectorAll<HTMLElement>('[id^="verse-"]');
+  const all = root.querySelectorAll<HTMLElement>('[id^="verse-"]');
   for (let i = 0; i < all.length; i++) {
     if (/^verse-\d+[a-z]*$/.test(all[i].id)) allValidAnchors.push(all[i]);
   }
@@ -1289,14 +1318,21 @@ function buildVerseFlashRanges(segments: VerseSegment[]): FlashRange[] {
     const range = activeDocument.createRange();
     try {
       range.setStartBefore(anchor);
-      const stop = findFlashStopBetween(anchor, next ?? null, includeHeadings);
+      const stop = findFlashStopBetween(
+        anchor,
+        next ?? null,
+        includeHeadings,
+        root
+      );
       if (stop) {
         range.setEndBefore(stop);
       } else if (next) {
         range.setEndBefore(next);
       } else {
-        // No next anchor and no stop — extend through end of body.
-        const last = activeDocument.body.lastChild;
+        const last =
+          root instanceof Element
+            ? root.lastElementChild ?? root.lastChild
+            : root.lastChild;
         if (!last) continue;
         range.setEndAfter(last);
       }

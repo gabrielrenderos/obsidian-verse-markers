@@ -487,6 +487,205 @@ function verseModeSourceIntervals(
 }
 
 /**
+ * Footnote reference syntax: `[^id]` not followed by `:` (which would
+ * make it a definition).
+ */
+const FOOTNOTE_REF_REGEX = /\[\^([^\]\s]+)\](?!:)/g;
+
+/**
+ * Footnote definition syntax: `[^id]:` at the start of a line.
+ */
+const FOOTNOTE_DEF_HEAD_REGEX = /^\[\^([^\]\s]+)\]:/;
+
+/**
+ * Character offset of the first footnote *definition* line (`[^id]:`) at or
+ * after `searchFrom`, or null. Inline refs in verse text are not matched.
+ */
+function footnoteDefinitionsBlockStart(
+  text: string,
+  searchFrom: number
+): number | null {
+  let offset = 0;
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (
+      offset >= searchFrom &&
+      FOOTNOTE_DEF_HEAD_REGEX.test(stripBlockquoteMarker(line))
+    ) {
+      return offset;
+    }
+    offset += line.length + (i < lines.length - 1 ? 1 : 0);
+  }
+  return null;
+}
+
+function mergeAdjacentSourceRanges(
+  ranges: Array<{ from: number; to: number }>
+): Array<{ from: number; to: number }> {
+  if (ranges.length === 0) return ranges;
+  const sorted = [...ranges].sort((a, b) => a.from - b.from);
+  const merged: Array<{ from: number; to: number }> = [sorted[0]];
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = merged[merged.length - 1];
+    const cur = sorted[i];
+    if (cur.from <= prev.to) {
+      prev.to = Math.max(prev.to, cur.to);
+    } else {
+      merged.push({ ...cur });
+    }
+  }
+  return merged;
+}
+
+/** Drop trailing whitespace from a half-open source range (flash highlight). */
+function trimTrailingWhitespaceRange(
+  text: string,
+  from: number,
+  to: number
+): { from: number; to: number } | null {
+  let end = to;
+  while (end > from && /\s/.test(text[end - 1])) end--;
+  if (end <= from || !/\S/.test(text.slice(from, end))) return null;
+  return { from, to: end };
+}
+
+function verseNumberAtMarker(text: string, offset: number): number | null {
+  const m = execVerseMarker(getVerseRegex(), text.slice(offset));
+  if (!m || m.index !== 0) return null;
+  return parseMarkerToken(m[0]).number;
+}
+
+/** True when no verse body text remains between `afterLine` and `before`. */
+function isEmptyTail(text: string, afterLine: number, before: number): boolean {
+  let tail = text.slice(afterLine, before);
+  const foot = footnoteDefinitionsBlockStart(text, afterLine);
+  if (foot !== null && foot < before) {
+    tail = text.slice(afterLine, foot);
+  }
+  return !/\S/.test(tail);
+}
+
+/**
+ * First ATX heading in `[searchFrom, searchBefore)` whose following tail is
+ * empty (trailing section heading after the verse). Interior heading-split
+ * headings have content after them and are not returned.
+ */
+function trailingHeadingStartInSpan(
+  text: string,
+  searchFrom: number,
+  searchBefore: number
+): number | null {
+  let offset = 0;
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (
+      offset >= searchFrom &&
+      offset < searchBefore &&
+      HEADING_LINE_REGEX.test(stripBlockquoteMarker(line))
+    ) {
+      const afterLine =
+        offset + line.length + (i < lines.length - 1 ? 1 : 0);
+      if (isEmptyTail(text, afterLine, searchBefore)) {
+        return offset;
+      }
+    }
+    offset += line.length + (i < lines.length - 1 ? 1 : 0);
+  }
+  return null;
+}
+
+/**
+ * End offset for flashing verse content in Live Preview — mirrors reading-view
+ * stops at footnotes always and at trailing headings when the next verse is not
+ * in the reference.
+ */
+function flashSpanEndForVerse(
+  text: string,
+  span: { start: number; end: number },
+  inRange: Set<number>
+): number {
+  let end = span.end;
+
+  const nextInSelection =
+    end < text.length &&
+    (() => {
+      const nextNum = verseNumberAtMarker(text, end);
+      return nextNum !== null && inRange.has(nextNum);
+    })();
+
+  if (!nextInSelection) {
+    const heading = trailingHeadingStartInSpan(text, span.start, end);
+    if (heading !== null) end = heading;
+  }
+
+  const footStart = footnoteDefinitionsBlockStart(text, span.start);
+  if (footStart !== null && footStart < end) end = footStart;
+
+  return end;
+}
+
+/**
+ * Source offsets of the `[N]` marker token for `verseNumber`, or null.
+ */
+function markerTokenRangeForVerse(
+  text: string,
+  verseNumber: number
+): { from: number; to: number } | null {
+  const re = getVerseRegex();
+  let m: RegExpExecArray | null;
+  while ((m = execVerseMarker(re, text)) !== null) {
+    if (parseMarkerToken(m[0]).number === verseNumber) {
+      return { from: m.index, to: m.index + m[0].length };
+    }
+  }
+  return null;
+}
+
+/** One contiguous highlighted run (disjoint segments produce separate runs). */
+export interface VerseFlashRun {
+  ranges: Array<{ from: number; to: number }>;
+  capStart: boolean;
+  capEnd: boolean;
+}
+
+export function getVerseFlashRuns(
+  text: string,
+  segments: VerseSegment[]
+): VerseFlashRun[] {
+  const inRange = new Set<number>();
+  for (const seg of segments) {
+    for (let n = seg.start; n <= seg.end; n++) inRange.add(n);
+  }
+
+  const runs: VerseFlashRun[] = [];
+  for (const seg of segments) {
+    const parts: Array<{ from: number; to: number }> = [];
+    for (let n = seg.start; n <= seg.end; n++) {
+      const span = findVerseSpan(text, n);
+      if (!span) continue;
+      const marker = markerTokenRangeForVerse(text, n);
+      const flashFrom = marker?.from ?? span.start;
+      const spanEnd = flashSpanEndForVerse(text, span, inRange);
+      parts.push(...verseModeSourceIntervals(text, flashFrom, spanEnd));
+    }
+    const ranges = mergeAdjacentSourceRanges(parts);
+    if (ranges.length === 0) continue;
+    const lastIdx = ranges.length - 1;
+    const trimmed = trimTrailingWhitespaceRange(
+      text,
+      ranges[lastIdx].from,
+      ranges[lastIdx].to
+    );
+    if (!trimmed) continue;
+    ranges[lastIdx] = trimmed;
+    runs.push({ ranges, capStart: true, capEnd: true });
+  }
+  return runs;
+}
+
+/**
  * Character ranges in `text` to flash for a (possibly disjoint) verse
  * reference. Respects `[//]` editorial toggles; used by Live Preview CM6 flash.
  */
@@ -494,15 +693,8 @@ export function getVerseFlashSourceRanges(
   text: string,
   segments: VerseSegment[]
 ): Array<{ from: number; to: number }> {
-  const out: Array<{ from: number; to: number }> = [];
-  for (const seg of segments) {
-    for (let n = seg.start; n <= seg.end; n++) {
-      const span = findVerseSpan(text, n);
-      if (!span) continue;
-      out.push(...verseModeSourceIntervals(text, span.start, span.end));
-    }
-  }
-  return out;
+  const runs = getVerseFlashRuns(text, segments);
+  return mergeAdjacentSourceRanges(runs.flatMap((run) => run.ranges));
 }
 
 /**
@@ -740,21 +932,6 @@ function stripTrailingHeadingsBeforeNextVerse(raw: string): string {
   }
   return lines.slice(0, end).join("\n").trimEnd();
 }
-
-/**
- * Footnote reference syntax: `[^id]` not followed by `:` (which would
- * make it a definition). The id can contain any non-bracket, non-space
- * characters — covers numeric, alphabetic, and Obsidian's
- * dash/underscore-separated identifiers.
- */
-const FOOTNOTE_REF_REGEX = /\[\^([^\]\s]+)\](?!:)/g;
-
-/**
- * Footnote definition syntax: `[^id]:` at the start of a line. The
- * definition body may continue onto subsequent lines as long as those
- * lines are blank or indented (per CommonMark/Obsidian footnote rules).
- */
-const FOOTNOTE_DEF_HEAD_REGEX = /^\[\^([^\]\s]+)\]:/;
 
 /**
  * Scans `slice` for footnote references whose definitions are missing

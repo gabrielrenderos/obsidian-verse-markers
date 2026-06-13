@@ -28,7 +28,7 @@ __export(main_exports, {
   default: () => VerseMarkersPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/detection.ts
 var VERSE_MARKER_REGEX = /\[\d+[a-z]*\](?=\s|$)/gm;
@@ -308,17 +308,133 @@ function verseModeSourceIntervals(text, from, to) {
   }
   return out;
 }
-function getVerseFlashSourceRanges(text, segments) {
-  const out = [];
+var FOOTNOTE_REF_REGEX = /\[\^([^\]\s]+)\](?!:)/g;
+var FOOTNOTE_DEF_HEAD_REGEX = /^\[\^([^\]\s]+)\]:/;
+function footnoteDefinitionsBlockStart(text, searchFrom) {
+  let offset = 0;
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (offset >= searchFrom && FOOTNOTE_DEF_HEAD_REGEX.test(stripBlockquoteMarker(line))) {
+      return offset;
+    }
+    offset += line.length + (i < lines.length - 1 ? 1 : 0);
+  }
+  return null;
+}
+function mergeAdjacentSourceRanges(ranges) {
+  if (ranges.length === 0)
+    return ranges;
+  const sorted = [...ranges].sort((a, b) => a.from - b.from);
+  const merged = [sorted[0]];
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = merged[merged.length - 1];
+    const cur = sorted[i];
+    if (cur.from <= prev.to) {
+      prev.to = Math.max(prev.to, cur.to);
+    } else {
+      merged.push({ ...cur });
+    }
+  }
+  return merged;
+}
+function trimTrailingWhitespaceRange(text, from, to) {
+  let end = to;
+  while (end > from && /\s/.test(text[end - 1]))
+    end--;
+  if (end <= from || !/\S/.test(text.slice(from, end)))
+    return null;
+  return { from, to: end };
+}
+function verseNumberAtMarker(text, offset) {
+  const m = execVerseMarker(getVerseRegex(), text.slice(offset));
+  if (!m || m.index !== 0)
+    return null;
+  return parseMarkerToken(m[0]).number;
+}
+function isEmptyTail(text, afterLine, before) {
+  let tail = text.slice(afterLine, before);
+  const foot = footnoteDefinitionsBlockStart(text, afterLine);
+  if (foot !== null && foot < before) {
+    tail = text.slice(afterLine, foot);
+  }
+  return !/\S/.test(tail);
+}
+function trailingHeadingStartInSpan(text, searchFrom, searchBefore) {
+  let offset = 0;
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (offset >= searchFrom && offset < searchBefore && HEADING_LINE_REGEX.test(stripBlockquoteMarker(line))) {
+      const afterLine = offset + line.length + (i < lines.length - 1 ? 1 : 0);
+      if (isEmptyTail(text, afterLine, searchBefore)) {
+        return offset;
+      }
+    }
+    offset += line.length + (i < lines.length - 1 ? 1 : 0);
+  }
+  return null;
+}
+function flashSpanEndForVerse(text, span, inRange) {
+  let end = span.end;
+  const nextInSelection = end < text.length && (() => {
+    const nextNum = verseNumberAtMarker(text, end);
+    return nextNum !== null && inRange.has(nextNum);
+  })();
+  if (!nextInSelection) {
+    const heading = trailingHeadingStartInSpan(text, span.start, end);
+    if (heading !== null)
+      end = heading;
+  }
+  const footStart = footnoteDefinitionsBlockStart(text, span.start);
+  if (footStart !== null && footStart < end)
+    end = footStart;
+  return end;
+}
+function markerTokenRangeForVerse(text, verseNumber) {
+  const re = getVerseRegex();
+  let m;
+  while ((m = execVerseMarker(re, text)) !== null) {
+    if (parseMarkerToken(m[0]).number === verseNumber) {
+      return { from: m.index, to: m.index + m[0].length };
+    }
+  }
+  return null;
+}
+function getVerseFlashRuns(text, segments) {
+  var _a;
+  const inRange = /* @__PURE__ */ new Set();
   for (const seg of segments) {
+    for (let n = seg.start; n <= seg.end; n++)
+      inRange.add(n);
+  }
+  const runs = [];
+  for (const seg of segments) {
+    const parts = [];
     for (let n = seg.start; n <= seg.end; n++) {
       const span = findVerseSpan(text, n);
       if (!span)
         continue;
-      out.push(...verseModeSourceIntervals(text, span.start, span.end));
+      const marker = markerTokenRangeForVerse(text, n);
+      const flashFrom = (_a = marker == null ? void 0 : marker.from) != null ? _a : span.start;
+      const spanEnd = flashSpanEndForVerse(text, span, inRange);
+      parts.push(...verseModeSourceIntervals(text, flashFrom, spanEnd));
     }
+    const ranges = mergeAdjacentSourceRanges(parts);
+    if (ranges.length === 0)
+      continue;
+    const lastIdx = ranges.length - 1;
+    const trimmed = trimTrailingWhitespaceRange(
+      text,
+      ranges[lastIdx].from,
+      ranges[lastIdx].to
+    );
+    if (!trimmed)
+      continue;
+    ranges[lastIdx] = trimmed;
+    runs.push({ ranges, capStart: true, capEnd: true });
   }
-  return out;
+  return runs;
 }
 function getVerseParts(text, verseNumber) {
   const span = findVerseSpan(text, verseNumber);
@@ -435,8 +551,6 @@ function stripTrailingHeadingsBeforeNextVerse(raw) {
   }
   return lines.slice(0, end).join("\n").trimEnd();
 }
-var FOOTNOTE_REF_REGEX = /\[\^([^\]\s]+)\](?!:)/g;
-var FOOTNOTE_DEF_HEAD_REGEX = /^\[\^([^\]\s]+)\]:/;
 function appendMissingFootnoteDefinitions(slice, fullText) {
   const referenced = /* @__PURE__ */ new Set();
   let m;
@@ -909,7 +1023,7 @@ function registerCommands(plugin) {
 }
 
 // src/references.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // src/highlights.ts
 var HEADING_LINE_REGEX2 = /^\s*#{1,6}\s+\S.*$/;
@@ -1061,73 +1175,365 @@ function convertHighlightInParagraph(paragraph) {
 
 // src/flashLivePreview.ts
 var import_state = require("@codemirror/state");
+var import_view2 = require("@codemirror/view");
+
+// src/nativeFlash.ts
+var import_obsidian2 = require("obsidian");
 var import_view = require("@codemirror/view");
+var VERSE_HIGHLIGHT_ACTIVE_CLASS = "verse-highlight-active";
+function isVerseHighlightActive() {
+  return activeDocument.body.classList.contains(VERSE_HIGHLIGHT_ACTIVE_CLASS);
+}
+function setVerseHighlightActive(active) {
+  activeDocument.body.classList.toggle(VERSE_HIGHLIGHT_ACTIVE_CLASS, active);
+}
+function cmView(editor) {
+  var _a;
+  return (_a = editor.cm) != null ? _a : null;
+}
+function scrollEditorWithoutFlash(editor, range, center = false) {
+  const view = cmView(editor);
+  if (!view)
+    return;
+  const from = editor.posToOffset(range.from);
+  const to = editor.posToOffset(range.to);
+  const anchor = center ? Math.round((from + to) / 2) : from;
+  view.dispatch({
+    effects: import_view.EditorView.scrollIntoView(anchor, {
+      y: center ? "center" : "nearest"
+    })
+  });
+}
+async function scrollReadingViewToLine(mdView, line) {
+  var _a, _b;
+  const v = mdView;
+  const renderer = (_a = v.previewMode) == null ? void 0 : _a.renderer;
+  if (renderer == null ? void 0 : renderer.applyScrollDelayed) {
+    renderer.applyScrollDelayed(line, { highlight: false });
+  } else if (renderer == null ? void 0 : renderer.applyScroll) {
+    renderer.applyScroll(line);
+  } else if ((_b = v.previewMode) == null ? void 0 : _b.applyScroll) {
+    v.previewMode.applyScroll(line);
+  } else if (v.applyScroll) {
+    v.applyScroll(line);
+  }
+  await new Promise((resolve) => {
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
+  });
+}
+function patchEditor(editor) {
+  var _a;
+  const ed = editor;
+  if (ed.__verseMarkersFlashPatched)
+    return;
+  ed.__verseMarkersFlashPatched = true;
+  const origHighlights = (_a = ed.addHighlights) == null ? void 0 : _a.bind(ed);
+  if (origHighlights) {
+    ed.addHighlights = (ranges, style, removePrevious, range) => {
+      if (isVerseHighlightActive() && style === "is-flashing")
+        return;
+      return origHighlights(ranges, style, removePrevious, range);
+    };
+  }
+  const origScroll = ed.scrollIntoView.bind(ed);
+  ed.scrollIntoView = (range, center) => {
+    if (isVerseHighlightActive()) {
+      scrollEditorWithoutFlash(ed, range, center != null ? center : false);
+      return;
+    }
+    return origScroll(range, center);
+  };
+}
+function patchMarkdownView(view) {
+  (view == null ? void 0 : view.editor) && patchEditor(view.editor);
+}
+function registerNativeFlashPrevention(plugin) {
+  plugin.app.workspace.iterateAllLeaves((leaf) => {
+    if (leaf.view instanceof import_obsidian2.MarkdownView)
+      patchMarkdownView(leaf.view);
+  });
+  plugin.registerEvent(
+    plugin.app.workspace.on("active-leaf-change", () => {
+      patchMarkdownView(plugin.app.workspace.getActiveViewOfType(import_obsidian2.MarkdownView));
+    })
+  );
+  plugin.registerEvent(
+    plugin.app.workspace.on("file-open", () => {
+      patchMarkdownView(plugin.app.workspace.getActiveViewOfType(import_obsidian2.MarkdownView));
+    })
+  );
+}
+
+// src/highlightDismiss.ts
+var VERSE_FLASH_AUTO_MS = 2e3;
+var dismissHandlers = [];
+var getSettings = null;
+var autoDismissTimer = null;
+function configureVerseHighlightBehavior(getter) {
+  getSettings = getter;
+}
+function keepHighlightUntilClick() {
+  var _a;
+  return (_a = getSettings == null ? void 0 : getSettings().keepHighlightUntilClick) != null ? _a : false;
+}
+function clearAutoDismissTimer() {
+  if (autoDismissTimer !== null) {
+    window.clearTimeout(autoDismissTimer);
+    autoDismissTimer = null;
+  }
+}
+function onVerseHighlightDismiss(handler) {
+  dismissHandlers.push(handler);
+  return () => {
+    const i = dismissHandlers.indexOf(handler);
+    if (i !== -1)
+      dismissHandlers.splice(i, 1);
+  };
+}
+function dismissVerseHighlight() {
+  clearAutoDismissTimer();
+  for (const handler of dismissHandlers)
+    handler();
+  setVerseHighlightActive(false);
+}
+function notifyVerseHighlightShown() {
+  clearAutoDismissTimer();
+  if (keepHighlightUntilClick())
+    return;
+  autoDismissTimer = window.setTimeout(() => {
+    dismissVerseHighlight();
+    autoDismissTimer = null;
+  }, VERSE_FLASH_AUTO_MS);
+}
+function registerVerseHighlightDismiss(plugin) {
+  plugin.registerDomEvent(
+    activeDocument,
+    "mousedown",
+    (ev) => {
+      if (!keepHighlightUntilClick())
+        return;
+      const target = ev.target;
+      if (isVerseNavigationTarget(target))
+        return;
+      dismissVerseHighlight();
+    },
+    { capture: true }
+  );
+}
+function isVerseNavigationTarget(target) {
+  var _a, _b;
+  const link = target.closest(
+    "a.internal-link, a.cm-underline, .cm-link, span.cm-link"
+  );
+  if (!link)
+    return false;
+  const href = (_b = (_a = link.getAttribute("data-href")) != null ? _a : link.getAttribute("href")) != null ? _b : "";
+  const hashIdx = href.indexOf("#");
+  if (hashIdx === -1)
+    return false;
+  return href.slice(hashIdx + 1).startsWith("verse-");
+}
+
+// src/flashLivePreview.ts
 var FLASH_FADE_MS = 220;
-var FLASH_HOLD_MS = 2e3;
 var setVerseFlashEffect = import_state.StateEffect.define();
+var activeSpec = null;
+function marksFromRuns(runs) {
+  const marks = [];
+  for (const run of runs) {
+    for (let i = 0; i < run.ranges.length; i++) {
+      const r = run.ranges[i];
+      marks.push({
+        from: r.from,
+        to: r.to,
+        capStart: run.capStart && i === 0,
+        capEnd: run.capEnd && i === run.ranges.length - 1
+      });
+    }
+  }
+  return normalizeGlobalCaps(marks);
+}
+function normalizeGlobalCaps(marks) {
+  if (marks.length <= 1)
+    return marks;
+  let firstIdx = 0;
+  let lastIdx = 0;
+  for (let i = 1; i < marks.length; i++) {
+    if (marks[i].from < marks[firstIdx].from)
+      firstIdx = i;
+    if (marks[i].to > marks[lastIdx].to)
+      lastIdx = i;
+  }
+  return marks.map((m, i) => ({
+    ...m,
+    capStart: m.capStart && i === firstIdx,
+    capEnd: m.capEnd && i === lastIdx
+  }));
+}
+function lastCappedChar(text, from, to) {
+  let i = to - 1;
+  while (i >= from && /\s/.test(text[i]))
+    i--;
+  return i >= from ? i : to - 1;
+}
+function flashClassMid(phase) {
+  return phase === "active" ? "verse-flash-cm verse-flash-cm-active" : "verse-flash-cm";
+}
+function addCappedMark(builder, mark, phase, text, globalEndChar) {
+  const { from, to, capStart, capEnd } = mark;
+  if (to <= from)
+    return;
+  const mid = flashClassMid(phase);
+  const endChar = capEnd ? globalEndChar : -1;
+  if (to - from === 1) {
+    const caps = [
+      capStart && "verse-flash-cm-start",
+      capEnd && endChar === from && "verse-flash-cm-end"
+    ].filter(Boolean);
+    builder.add(from, to, import_view2.Decoration.mark({ class: [mid, ...caps].join(" ") }));
+    return;
+  }
+  let pos = from;
+  if (capStart) {
+    builder.add(
+      pos,
+      pos + 1,
+      import_view2.Decoration.mark({ class: `${mid} verse-flash-cm-start` })
+    );
+    pos++;
+  }
+  const bodyEnd = capEnd && endChar >= pos ? endChar : to;
+  if (bodyEnd > pos) {
+    builder.add(pos, bodyEnd, import_view2.Decoration.mark({ class: mid }));
+  }
+  if (capEnd && endChar >= from && endChar < to) {
+    builder.add(
+      endChar,
+      endChar + 1,
+      import_view2.Decoration.mark({ class: `${mid} verse-flash-cm-end` })
+    );
+    if (endChar + 1 < to) {
+      builder.add(endChar + 1, to, import_view2.Decoration.mark({ class: mid }));
+    }
+  }
+}
+function flashClassesForWidget(from, to) {
+  if (!activeSpec)
+    return "";
+  for (const m of activeSpec.marks) {
+    if (m.from >= to || m.to <= from)
+      continue;
+    const parts = ["verse-flash-cm"];
+    if (activeSpec.phase === "active")
+      parts.push("verse-flash-cm-active");
+    if (m.capStart && from <= m.from)
+      parts.push("verse-flash-cm-start");
+    if (m.capEnd && to >= m.to)
+      parts.push("verse-flash-cm-end");
+    return parts.join(" ");
+  }
+  return "";
+}
 var verseFlashField = import_state.StateField.define({
   create() {
-    return import_view.Decoration.none;
+    return import_view2.Decoration.none;
   },
   update(deco, tr) {
     for (const e of tr.effects) {
       if (e.is(setVerseFlashEffect)) {
-        if (!e.value || e.value.ranges.length === 0)
-          return import_view.Decoration.none;
-        const cls = e.value.phase === "active" ? "verse-flash-cm verse-flash-cm-active" : "verse-flash-cm";
+        activeSpec = e.value;
+        if (!e.value || e.value.marks.length === 0) {
+          return import_view2.Decoration.none;
+        }
+        const doc = tr.state.doc.toString();
+        const marks = e.value.marks;
+        const globalEndChar = lastCappedChar(
+          doc,
+          0,
+          Math.max(...marks.map((m) => m.to))
+        );
         const builder = new import_state.RangeSetBuilder();
-        for (const r of e.value.ranges) {
-          if (r.to > r.from) {
-            builder.add(r.from, r.to, import_view.Decoration.mark({ class: cls }));
-          }
+        for (const mark of marks) {
+          addCappedMark(builder, mark, e.value.phase, doc, globalEndChar);
         }
         return builder.finish();
       }
     }
     return deco.map(tr.changes);
   },
-  provide: (f) => import_view.EditorView.decorations.from(f)
+  provide: (f) => import_view2.EditorView.decorations.from(f)
 });
 function verseFlashExtension() {
   return verseFlashField;
 }
-var flashTimer = null;
+var fadeTimer = null;
+var activeEditor = null;
+var activeMarks = [];
 function editorView(editor) {
   const cm = editor.cm;
   return cm != null ? cm : null;
 }
-function clearLivePreviewFlash(editor) {
-  if (flashTimer !== null) {
-    window.clearTimeout(flashTimer);
-    flashTimer = null;
+function clearLivePreviewFlash(editor, fadeOut = true) {
+  if (fadeTimer !== null) {
+    window.clearTimeout(fadeTimer);
+    fadeTimer = null;
   }
-  const view = editorView(editor);
-  if (!view)
+  const view = editor ? editorView(editor) : activeEditor ? editorView(activeEditor) : null;
+  if (!view) {
+    activeEditor = null;
+    activeMarks = [];
+    activeSpec = null;
     return;
-  view.dispatch({ effects: setVerseFlashEffect.of(null) });
+  }
+  if (!fadeOut) {
+    activeEditor = null;
+    activeMarks = [];
+    activeSpec = null;
+    view.dispatch({ effects: setVerseFlashEffect.of(null) });
+    return;
+  }
+  if (activeMarks.length === 0) {
+    activeEditor = null;
+    activeSpec = null;
+    view.dispatch({ effects: setVerseFlashEffect.of(null) });
+    return;
+  }
+  view.dispatch({
+    effects: setVerseFlashEffect.of({ marks: activeMarks, phase: "inactive" })
+  });
+  fadeTimer = window.setTimeout(() => {
+    view.dispatch({ effects: setVerseFlashEffect.of(null) });
+    fadeTimer = null;
+    activeEditor = null;
+    activeMarks = [];
+    activeSpec = null;
+  }, FLASH_FADE_MS);
 }
 function flashVerseSegmentsInEditor(editor, content, segments) {
   const view = editorView(editor);
   if (!view)
     return;
-  const ranges = getVerseFlashSourceRanges(content, segments);
-  if (ranges.length === 0)
+  const runs = getVerseFlashRuns(content, segments);
+  const marks = marksFromRuns(runs);
+  if (marks.length === 0) {
+    setVerseHighlightActive(false);
     return;
-  clearLivePreviewFlash(editor);
+  }
+  clearLivePreviewFlash(editor, false);
+  activeEditor = editor;
+  activeMarks = marks;
+  setVerseHighlightActive(true);
   const dispatch = (phase) => {
-    view.dispatch({ effects: setVerseFlashEffect.of({ ranges, phase }) });
+    view.dispatch({ effects: setVerseFlashEffect.of({ marks, phase }) });
   };
   dispatch("inactive");
   window.requestAnimationFrame(() => {
     dispatch("active");
-    flashTimer = window.setTimeout(() => {
-      dispatch("inactive");
-      flashTimer = window.setTimeout(() => {
-        view.dispatch({ effects: setVerseFlashEffect.of(null) });
-        flashTimer = null;
-      }, FLASH_FADE_MS);
-    }, FLASH_HOLD_MS);
+    notifyVerseHighlightShown();
   });
+}
+function clearActiveLivePreviewFlash(fadeOut = true) {
+  clearLivePreviewFlash(activeEditor, fadeOut);
 }
 
 // src/references.ts
@@ -1292,6 +1698,37 @@ function registerVersePagePreview(plugin) {
   } catch (e) {
   }
 }
+function registerVerseLinkNavigation(plugin) {
+  const { workspace } = plugin.app;
+  const original = workspace.openLinkText.bind(workspace);
+  workspace.openLinkText = async (linktext, sourcePath, newLeaf, openViewState) => {
+    const allowShorthand = plugin.settings.enableShorthandSyntax;
+    const fragment = verseFragmentOf(linktext, allowShorthand);
+    if (fragment) {
+      const hashIdx = linktext.indexOf("#");
+      const filePart = linktext.slice(0, hashIdx);
+      const file = plugin.app.metadataCache.getFirstLinkpathDest(
+        filePart,
+        sourcePath
+      );
+      if (file instanceof import_obsidian3.TFile) {
+        const handled = await resolveVerseLink(
+          plugin.app,
+          file,
+          fragment,
+          allowShorthand,
+          { newLeaf }
+        );
+        if (handled)
+          return;
+      }
+    }
+    return original(linktext, sourcePath, newLeaf, openViewState);
+  };
+  plugin.register(() => {
+    workspace.openLinkText = original;
+  });
+}
 function openVersePopover(plugin, hoverParent, targetEl, linktext, sourcePath) {
   const allowShorthand = plugin.settings.enableShorthandSyntax;
   const hashIndex = linktext.indexOf("#");
@@ -1300,12 +1737,12 @@ function openVersePopover(plugin, hoverParent, targetEl, linktext, sourcePath) {
   const filePart = linktext.slice(0, hashIndex);
   const fragment = linktext.slice(hashIndex + 1);
   const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, sourcePath);
-  if (!(file instanceof import_obsidian2.TFile))
+  if (!(file instanceof import_obsidian3.TFile))
     return;
   const current = hoverParent.hoverPopover;
   if (current && current.__verseTargetEl === targetEl)
     return;
-  const popover = new import_obsidian2.HoverPopover(hoverParent, targetEl);
+  const popover = new import_obsidian3.HoverPopover(hoverParent, targetEl);
   popover.__verseTargetEl = targetEl;
   popover.hoverPopover = null;
   popover.hoverEl.addClass("verse-hover-preview");
@@ -1360,7 +1797,7 @@ async function renderVersePopover(plugin, popover, isAlive, file, fragment, sour
   const preview = content.createDiv({
     cls: "markdown-preview-view markdown-rendered"
   });
-  await import_obsidian2.MarkdownRenderer.render(
+  await import_obsidian3.MarkdownRenderer.render(
     plugin.app,
     convertHighlightSyntaxToHtml(markdown),
     preview,
@@ -1373,7 +1810,7 @@ async function renderVersePopover(plugin, popover, isAlive, file, fragment, sour
     cls: "markdown-embed-link",
     attr: { "aria-label": "Open link" }
   });
-  (0, import_obsidian2.setIcon)(openLink, "lucide-maximize-2");
+  (0, import_obsidian3.setIcon)(openLink, "lucide-maximize-2");
   openLink.addEventListener("click", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
@@ -1435,7 +1872,7 @@ function wirePopoverAnchors(plugin, contentEl, popover, sourcePath) {
         filePart,
         sourcePath
       );
-      if (!(file instanceof import_obsidian2.TFile))
+      if (!(file instanceof import_obsidian3.TFile))
         return;
       ev.preventDefault();
       ev.stopPropagation();
@@ -1454,14 +1891,38 @@ function wirePopoverAnchors(plugin, contentEl, popover, sourcePath) {
     });
   }
 }
-async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
-  var _a, _b;
+function markdownViewForFile(app, leaf, file) {
+  if (leaf.view instanceof import_obsidian3.MarkdownView && leaf.view.file === file) {
+    return leaf.view;
+  }
+  const active = app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView);
+  if ((active == null ? void 0 : active.file) === file)
+    return active;
+  return null;
+}
+function readingPreviewRoot(view) {
+  var _a;
+  return (_a = view.containerEl.querySelector(".markdown-preview-view")) != null ? _a : view.contentEl;
+}
+function verseAnchorIn(root, id) {
+  try {
+    return root.querySelector(`#${CSS.escape(id)}`);
+  } catch (e) {
+    return root.querySelector(`#${id}`);
+  }
+}
+function verseAnchorMounted(root, primaryId, fallbackId) {
+  return verseAnchorIn(root, primaryId) !== null || verseAnchorIn(root, fallbackId) !== null;
+}
+async function resolveVerseLink(app, file, fragment, allowShorthand = false, options) {
+  var _a, _b, _c;
   const segments = parseVerseSegments(fragment, allowShorthand);
   if (!segments || segments.length === 0)
     return false;
   let startVerse = segments[0].start;
   let startPart = segments[0].startPart;
-  const leaf = app.workspace.getMostRecentLeaf();
+  const activeMd = app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView);
+  const leaf = (options == null ? void 0 : options.newLeaf) ? app.workspace.getLeaf(true) : (_a = activeMd == null ? void 0 : activeMd.leaf) != null ? _a : app.workspace.getMostRecentLeaf();
   if (!leaf)
     return false;
   const content = await app.vault.cachedRead(file);
@@ -1476,40 +1937,67 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false) {
   const primaryId = startPart ? `verse-${startVerse}${startPart}` : `verse-${startVerse}`;
   const firstPart = firstFragmentPart(content, startVerse);
   const fallbackId = !startPart && firstPart ? `verse-${startVerse}${firstPart}` : `verse-${startVerse}`;
-  const mdView = leaf.view instanceof import_obsidian2.MarkdownView ? leaf.view : null;
-  const isLivePreview = (mdView == null ? void 0 : mdView.getMode()) === "source";
-  const sameFileOpen = (mdView == null ? void 0 : mdView.file) === file;
-  const anchorAlreadyMounted = sameFileOpen && !isLivePreview && (activeDocument.getElementById(primaryId) !== null || activeDocument.getElementById(fallbackId) !== null);
+  const mdViewBefore = leaf.view instanceof import_obsidian3.MarkdownView ? leaf.view : null;
+  const isLivePreviewBefore = (mdViewBefore == null ? void 0 : mdViewBefore.getMode()) === "source" && mdViewBefore.file === file;
+  const sameFileOpen = (mdViewBefore == null ? void 0 : mdViewBefore.file) === file;
+  const anchorAlreadyMounted = sameFileOpen && !isLivePreviewBefore && mdViewBefore !== null && verseAnchorMounted(
+    readingPreviewRoot(mdViewBefore),
+    primaryId,
+    fallbackId
+  );
   const needForcedScroll = !anchorAlreadyMounted && targetLine !== null;
-  const openState = needForcedScroll && targetLine !== null ? { eState: { line: targetLine } } : void 0;
-  if (needForcedScroll) {
-    suppressNativeFlashFor(NATIVE_FLASH_SUPPRESS_MS);
-  }
-  await leaf.openFile(file, openState);
-  if (needForcedScroll && targetLine !== null && leaf.view instanceof import_obsidian2.MarkdownView) {
-    const scrollableView = leaf.view;
-    (_a = scrollableView.applyScroll) == null ? void 0 : _a.call(scrollableView, targetLine);
+  setVerseHighlightActive(true);
+  await leaf.openFile(file);
+  const mdView = markdownViewForFile(app, leaf, file);
+  const isLivePreview = (mdView == null ? void 0 : mdView.getMode()) === "source";
+  if (needForcedScroll && targetLine !== null && mdView && isLivePreview) {
+    const pos = { line: targetLine, ch: 0 };
+    mdView.editor.setCursor(pos);
+    scrollEditorWithoutFlash(mdView.editor, { from: pos, to: pos }, true);
   }
   if (isLivePreview && mdView) {
-    window.requestAnimationFrame(() => {
+    const runFlash = () => {
       if (targetLine !== null) {
         const pos = { line: targetLine, ch: 0 };
         mdView.editor.setCursor(pos);
-        mdView.editor.scrollIntoView({ from: pos, to: pos }, true);
+        scrollEditorWithoutFlash(mdView.editor, { from: pos, to: pos }, true);
       }
-      const docText = mdView.file === file ? mdView.editor.getValue() : content;
-      flashVerseSegmentsInEditor(mdView.editor, docText, flashSegments);
+      flashVerseSegmentsInEditor(
+        mdView.editor,
+        mdView.editor.getValue(),
+        flashSegments
+      );
+    };
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(runFlash);
     });
-  } else {
-    const anchor = (_b = await waitForElementById(primaryId, ANCHOR_WAIT_TIMEOUT_MS)) != null ? _b : activeDocument.getElementById(fallbackId);
+  } else if (mdView) {
+    const previewRoot = readingPreviewRoot(mdView);
+    if (targetLine !== null && needForcedScroll) {
+      await scrollReadingViewToLine(mdView, targetLine);
+    }
+    let anchor = (_b = await waitForElementById(
+      primaryId,
+      ANCHOR_WAIT_TIMEOUT_MS,
+      previewRoot
+    )) != null ? _b : verseAnchorIn(previewRoot, fallbackId);
+    if (!anchor && targetLine !== null) {
+      await scrollReadingViewToLine(mdView, targetLine);
+      anchor = (_c = await waitForElementById(
+        primaryId,
+        ANCHOR_WAIT_TIMEOUT_MS,
+        previewRoot
+      )) != null ? _c : verseAnchorIn(previewRoot, fallbackId);
+    }
     if (anchor) {
+      const scrollTarget = anchor;
       window.requestAnimationFrame(() => {
-        if (activeDocument.body.contains(anchor)) {
-          smoothScrollAnchorToCenter(anchor);
+        if (previewRoot.contains(scrollTarget)) {
+          smoothScrollAnchorToCenter(scrollTarget);
         }
       });
     }
-    flashVerseSegments(flashSegments);
+    flashVerseSegments(flashSegments, previewRoot);
   }
   return true;
 }
@@ -1542,62 +2030,11 @@ function smoothScrollAnchorToCenter(anchor) {
   const target = container.scrollTop + relTop + anchorRect.height / 2 - container.clientHeight / 2;
   container.scrollTo({ top: target, behavior: "smooth" });
 }
-var NATIVE_FLASH_SUPPRESS_MS = 5e3;
-var NATIVE_FLASH_CLASSES = [
-  "is-flashing",
-  "is-flashing-block",
-  "has-active-flash",
-  "is-flash"
-];
-function stripNativeFlashClasses(el) {
-  for (const cls of NATIVE_FLASH_CLASSES) {
-    if (el.classList.contains(cls))
-      el.classList.remove(cls);
-  }
-}
-function suppressNativeFlashFor(durationMs) {
-  const root = activeDocument.body;
-  for (const cls of NATIVE_FLASH_CLASSES) {
-    root.querySelectorAll(`.${cls}`).forEach(stripNativeFlashClasses);
-  }
-  const observer = new MutationObserver((mutations) => {
-    for (const m of mutations) {
-      if (m.type === "attributes" && m.attributeName === "class") {
-        stripNativeFlashClasses(m.target);
-      } else if (m.type === "childList") {
-        for (const node of Array.from(m.addedNodes)) {
-          if (node.nodeType !== Node.ELEMENT_NODE)
-            continue;
-          const el = node;
-          stripNativeFlashClasses(el);
-          for (const cls of NATIVE_FLASH_CLASSES) {
-            el.querySelectorAll(`.${cls}`).forEach(stripNativeFlashClasses);
-          }
-        }
-      }
-    }
-  });
-  observer.observe(root, {
-    attributes: true,
-    attributeFilter: ["class"],
-    childList: true,
-    subtree: true
-  });
-  let disposed = false;
-  const dispose = () => {
-    if (disposed)
-      return;
-    disposed = true;
-    observer.disconnect();
-    window.clearTimeout(timer);
-  };
-  const timer = window.setTimeout(dispose, durationMs);
-  return dispose;
-}
-function waitForElementById(id, timeoutMs) {
-  const existing = activeDocument.getElementById(id);
+function waitForElementById(id, timeoutMs, root) {
+  const existing = verseAnchorIn(root, id);
   if (existing)
     return Promise.resolve(existing);
+  const observeTarget = root instanceof Document ? root.body : root;
   return new Promise((resolve) => {
     let settled = false;
     const finish = (el) => {
@@ -1609,32 +2046,52 @@ function waitForElementById(id, timeoutMs) {
       resolve(el);
     };
     const observer = new MutationObserver(() => {
-      const el = activeDocument.getElementById(id);
+      const el = verseAnchorIn(root, id);
       if (el)
         finish(el);
     });
-    observer.observe(activeDocument.body, { childList: true, subtree: true });
+    observer.observe(observeTarget, { childList: true, subtree: true });
     const timer = window.setTimeout(() => {
-      finish(activeDocument.getElementById(id));
+      finish(verseAnchorIn(root, id));
     }, timeoutMs);
   });
 }
 var FLASH_FADE_MS2 = 220;
-var FLASH_HOLD_MS2 = 2e3;
+var FLASH_SKIP_INLINE = "h1,h2,h3,h4,h5,h6,.verse-editorial";
 var activeFlashSpans = [];
-var flashTimer2 = null;
-function flashVerseSegments(segments) {
-  const flashRanges = buildVerseFlashRanges(segments);
+var flashFadeTimer = null;
+function clearReadingViewHighlight(fadeOut = true) {
+  if (flashFadeTimer !== null) {
+    window.clearTimeout(flashFadeTimer);
+    flashFadeTimer = null;
+  }
+  const spans = activeFlashSpans;
+  if (spans.length === 0)
+    return;
+  if (!fadeOut) {
+    unwrapFlashSpans();
+    if (activeFlashSpans.length === 0)
+      setVerseHighlightActive(false);
+    return;
+  }
+  for (const s of spans)
+    s.classList.remove("verse-flash-active");
+  flashFadeTimer = window.setTimeout(() => {
+    if (activeFlashSpans === spans) {
+      unwrapFlashSpans();
+      setVerseHighlightActive(false);
+    }
+    flashFadeTimer = null;
+  }, FLASH_FADE_MS2);
+}
+function flashVerseSegments(segments, root) {
+  const flashRanges = buildVerseFlashRanges(segments, root);
   if (flashRanges.length === 0)
     return;
-  if (flashTimer2 !== null) {
-    window.clearTimeout(flashTimer2);
-    flashTimer2 = null;
-  }
-  unwrapFlashSpans();
+  clearReadingViewHighlight(false);
   const spans = [];
   for (const fr of flashRanges) {
-    const rangeSpans = wrapRangeWithSpans(fr.range, "verse-flash");
+    const rangeSpans = wrapRangeWithSpans(fr.range, "verse-flash", fr.capEnd);
     if (rangeSpans.length > 0) {
       if (fr.capStart)
         rangeSpans[0].classList.add("verse-flash-start");
@@ -1648,21 +2105,14 @@ function flashVerseSegments(segments) {
   if (spans.length === 0)
     return;
   activeFlashSpans = spans;
+  setVerseHighlightActive(true);
   window.requestAnimationFrame(() => {
     for (const s of spans)
       s.classList.add("verse-flash-active");
+    notifyVerseHighlightShown();
   });
-  flashTimer2 = window.setTimeout(() => {
-    for (const s of spans)
-      s.classList.remove("verse-flash-active");
-    flashTimer2 = window.setTimeout(() => {
-      if (activeFlashSpans === spans)
-        unwrapFlashSpans();
-      flashTimer2 = null;
-    }, FLASH_FADE_MS2);
-  }, FLASH_HOLD_MS2);
 }
-function wrapRangeWithSpans(range, className) {
+function wrapRangeWithSpans(range, className, trimTrailingEnd = false) {
   const spans = [];
   const ancestor = range.commonAncestorContainer;
   const walkRoot = ancestor.nodeType === Node.TEXT_NODE ? ancestor.parentNode : ancestor;
@@ -1676,16 +2126,35 @@ function wrapRangeWithSpans(range, className) {
     if (!t.nodeValue || t.nodeValue.length === 0)
       continue;
     const owner = t.parentElement;
-    if (owner && owner.closest("h1, h2, h3, h4, h5, h6"))
-      continue;
-    if (owner && owner.closest(".verse-editorial"))
-      continue;
-    if (!/\S/.test(t.nodeValue))
+    if (owner && owner.closest(FLASH_SKIP_INLINE))
       continue;
     if (range.intersectsNode(t))
       candidates.push(t);
   }
-  for (const node of candidates) {
+  if (trimTrailingEnd) {
+    while (candidates.length > 0) {
+      const last = candidates[candidates.length - 1];
+      if (!last.nodeValue) {
+        candidates.pop();
+        continue;
+      }
+      if (!/\S/.test(last.nodeValue)) {
+        candidates.pop();
+        continue;
+      }
+      const trimmedLen = last.nodeValue.replace(/\s+$/, "").length;
+      if (trimmedLen === 0) {
+        candidates.pop();
+        continue;
+      }
+      if (trimmedLen < last.nodeValue.length) {
+        last.splitText(trimmedLen);
+      }
+      break;
+    }
+  }
+  for (let i = 0; i < candidates.length; i++) {
+    const node = candidates[i];
     const parent = node.parentNode;
     if (!parent)
       continue;
@@ -1726,9 +2195,9 @@ function anchorInSegment(n, part, seg) {
   }
   return true;
 }
-function collectInSegmentsAnchors(segments) {
+function collectInSegmentsAnchors(segments, root) {
   var _a;
-  const all = activeDocument.querySelectorAll('[id^="verse-"]');
+  const all = root.querySelectorAll('[id^="verse-"]');
   const inRange = [];
   for (let i = 0; i < all.length; i++) {
     const el = all[i];
@@ -1748,9 +2217,9 @@ var FLASH_STOP_FOOTNOTE_SELECTORS = [
   "ol.footnote-list"
 ];
 var FLASH_STOP_HEADING_SELECTORS = ["h1", "h2", "h3", "h4", "h5", "h6"];
-function findFlashStopBetween(a, b, includeHeadings) {
+function findFlashStopBetween(a, b, includeHeadings, root) {
   const selectors = includeHeadings ? [...FLASH_STOP_FOOTNOTE_SELECTORS, ...FLASH_STOP_HEADING_SELECTORS] : FLASH_STOP_FOOTNOTE_SELECTORS;
-  const candidates = activeDocument.querySelectorAll(selectors.join(","));
+  const candidates = root.querySelectorAll(selectors.join(","));
   for (let i = 0; i < candidates.length; i++) {
     const el = candidates[i];
     if (!(a.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) {
@@ -1763,12 +2232,13 @@ function findFlashStopBetween(a, b, includeHeadings) {
   }
   return null;
 }
-function buildVerseFlashRanges(segments) {
-  const inRange = collectInSegmentsAnchors(segments);
+function buildVerseFlashRanges(segments, root) {
+  var _a;
+  const inRange = collectInSegmentsAnchors(segments, root);
   if (inRange.length === 0)
     return [];
   const allValidAnchors = [];
-  const all = activeDocument.querySelectorAll('[id^="verse-"]');
+  const all = root.querySelectorAll('[id^="verse-"]');
   for (let i = 0; i < all.length; i++) {
     if (/^verse-\d+[a-z]*$/.test(all[i].id))
       allValidAnchors.push(all[i]);
@@ -1785,13 +2255,18 @@ function buildVerseFlashRanges(segments) {
     const range = activeDocument.createRange();
     try {
       range.setStartBefore(anchor);
-      const stop = findFlashStopBetween(anchor, next != null ? next : null, includeHeadings);
+      const stop = findFlashStopBetween(
+        anchor,
+        next != null ? next : null,
+        includeHeadings,
+        root
+      );
       if (stop) {
         range.setEndBefore(stop);
       } else if (next) {
         range.setEndBefore(next);
       } else {
-        const last = activeDocument.body.lastChild;
+        const last = root instanceof Element ? (_a = root.lastElementChild) != null ? _a : root.lastChild : root.lastChild;
         if (!last)
           continue;
         range.setEndAfter(last);
@@ -1809,7 +2284,7 @@ function buildVerseFlashRanges(segments) {
 }
 
 // src/embeds.ts
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 function wrapAsDocumentBlocks(preview) {
   const doc = preview.ownerDocument;
   for (const child of Array.from(preview.children)) {
@@ -1819,7 +2294,7 @@ function wrapAsDocumentBlocks(preview) {
     wrapper.appendChild(child);
   }
 }
-var VerseEmbed = class extends import_obsidian3.Component {
+var VerseEmbed = class extends import_obsidian4.Component {
   constructor(plugin, ctx, file, fragment) {
     super();
     this.plugin = plugin;
@@ -1870,7 +2345,7 @@ var VerseEmbed = class extends import_obsidian3.Component {
     const preview = content.createDiv({
       cls: "markdown-rendered verse-embed-preview"
     });
-    await import_obsidian3.MarkdownRenderer.render(
+    await import_obsidian4.MarkdownRenderer.render(
       this.plugin.app,
       convertHighlightSyntaxToHtml(markdown),
       preview,
@@ -1885,7 +2360,7 @@ var VerseEmbed = class extends import_obsidian3.Component {
       cls: "markdown-embed-link",
       attr: { "aria-label": "Open link" }
     });
-    (0, import_obsidian3.setIcon)(link, "lucide-maximize-2");
+    (0, import_obsidian4.setIcon)(link, "lucide-maximize-2");
     link.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -1927,15 +2402,16 @@ function registerVerseEmbeds(plugin) {
 }
 
 // src/livePreview.ts
-var import_view2 = require("@codemirror/view");
+var import_view3 = require("@codemirror/view");
 var import_state2 = require("@codemirror/state");
-var VerseMarkerWidget = class extends import_view2.WidgetType {
-  constructor(label) {
+var VerseMarkerWidget = class extends import_view3.WidgetType {
+  constructor(label, flashClass) {
     super();
     this.label = label;
+    this.flashClass = flashClass;
   }
   eq(other) {
-    return other instanceof VerseMarkerWidget && other.label === this.label;
+    return other instanceof VerseMarkerWidget && other.label === this.label && other.flashClass === this.flashClass;
   }
   /** Pass clicks/edits through; footnote `[^1]` after the widget stays interactive. */
   ignoreEvent() {
@@ -1943,7 +2419,7 @@ var VerseMarkerWidget = class extends import_view2.WidgetType {
   }
   toDOM() {
     const wrap = document.createElement("span");
-    wrap.className = "verse-marker-widget";
+    wrap.className = ["verse-marker-widget", this.flashClass].filter(Boolean).join(" ");
     const open = document.createElement("span");
     open.className = "verse-marker-bracket";
     open.textContent = "[";
@@ -1969,19 +2445,19 @@ function pushBracketLabelMarks(specs, tokenFrom, tokenTo) {
     {
       from: tokenFrom,
       to: tokenFrom + 1,
-      decoration: import_view2.Decoration.mark({ class: "verse-marker-bracket" }),
+      decoration: import_view3.Decoration.mark({ class: "verse-marker-bracket" }),
       atomic: false
     },
     {
       from: tokenFrom + 1,
       to: tokenTo - 1,
-      decoration: import_view2.Decoration.mark({ class: "verse-marker" }),
+      decoration: import_view3.Decoration.mark({ class: "verse-marker" }),
       atomic: false
     },
     {
       from: tokenTo - 1,
       to: tokenTo,
-      decoration: import_view2.Decoration.mark({ class: "verse-marker-bracket" }),
+      decoration: import_view3.Decoration.mark({ class: "verse-marker-bracket" }),
       atomic: false
     }
   );
@@ -2009,7 +2485,7 @@ function collectDecorationSpecs(view) {
           specs.push({
             from: breakFrom + 1,
             to: breakTo - 1,
-            decoration: import_view2.Decoration.mark({ class: "verse-marker" }),
+            decoration: import_view3.Decoration.mark({ class: "verse-marker" }),
             atomic: false
           });
         } else {
@@ -2025,8 +2501,11 @@ function collectDecorationSpecs(view) {
         specs.push({
           from: matchFrom,
           to: matchTo,
-          decoration: import_view2.Decoration.replace({
-            widget: new VerseMarkerWidget(verseMarkerLabel2(m[0])),
+          decoration: import_view3.Decoration.replace({
+            widget: new VerseMarkerWidget(
+              verseMarkerLabel2(m[0]),
+              flashClassesForWidget(matchFrom, matchTo)
+            ),
             inclusive: false,
             block: false
           }),
@@ -2055,6 +2534,13 @@ function buildDecorations(view) {
     atomic: atomicBuilder.finish()
   };
 }
+function transactionHasFlashChange(tr) {
+  for (const e of tr.effects) {
+    if (e.is(setVerseFlashEffect))
+      return true;
+  }
+  return false;
+}
 var VerseMarkerLivePreviewPlugin = class {
   constructor(view) {
     const built = buildDecorations(view);
@@ -2062,7 +2548,8 @@ var VerseMarkerLivePreviewPlugin = class {
     this.atomicDeco = built.atomic;
   }
   update(update) {
-    if (update.docChanged || update.viewportChanged) {
+    const flashChanged = update.transactions.some(transactionHasFlashChange);
+    if (update.docChanged || update.viewportChanged || flashChanged) {
       const built = buildDecorations(update.view);
       this.decorations = built.all;
       this.atomicDeco = built.atomic;
@@ -2071,12 +2558,12 @@ var VerseMarkerLivePreviewPlugin = class {
 };
 function verseMarkerLivePreviewExtension() {
   let plugin;
-  plugin = import_view2.ViewPlugin.fromClass(VerseMarkerLivePreviewPlugin, {
+  plugin = import_view3.ViewPlugin.fromClass(VerseMarkerLivePreviewPlugin, {
     decorations: (p) => p.decorations,
-    provide: () => import_view2.EditorView.atomicRanges.of(
+    provide: () => import_view3.EditorView.atomicRanges.of(
       (view) => {
         var _a, _b;
-        return (_b = (_a = view.plugin(plugin)) == null ? void 0 : _a.atomicDeco) != null ? _b : import_view2.Decoration.none;
+        return (_b = (_a = view.plugin(plugin)) == null ? void 0 : _a.atomicDeco) != null ? _b : import_view3.Decoration.none;
       }
     )
   });
@@ -2084,13 +2571,14 @@ function verseMarkerLivePreviewExtension() {
 }
 
 // src/settings.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 var DEFAULT_SETTINGS = {
   enableHoverPreviews: true,
   hoverPreviewMaxVerses: 20,
-  enableShorthandSyntax: false
+  enableShorthandSyntax: false,
+  keepHighlightUntilClick: false
 };
-var VerseMarkersSettingTab = class extends import_obsidian4.PluginSettingTab {
+var VerseMarkersSettingTab = class extends import_obsidian5.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -2098,7 +2586,7 @@ var VerseMarkersSettingTab = class extends import_obsidian4.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian4.Setting(containerEl).setName("Reference syntax").setHeading();
+    new import_obsidian5.Setting(containerEl).setName("Reference syntax").setHeading();
     const syntaxEl = containerEl.createEl("div", {
       cls: "setting-item-description verse-markers-syntax-ref"
     });
@@ -2111,13 +2599,13 @@ var VerseMarkersSettingTab = class extends import_obsidian4.PluginSettingTab {
     syntaxEl.appendText(
       "Shorthand (opt-in below) \u2014 [[File#3]] / [[File#3a]] / [[File#3:7]]"
     );
-    new import_obsidian4.Setting(containerEl).setName("Enable range hover previews").setDesc("Show a popover with verse content when hovering over [[FILE#verse-N:M]] links.").addToggle(
+    new import_obsidian5.Setting(containerEl).setName("Enable range hover previews").setDesc("Show a popover with verse content when hovering over [[FILE#verse-N:M]] links.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableHoverPreviews).onChange(async (value) => {
         this.plugin.settings.enableHoverPreviews = value;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian4.Setting(containerEl).setName("Enable shorthand reference syntax").setDesc(
+    new import_obsidian5.Setting(containerEl).setName("Enable shorthand reference syntax").setDesc(
       'Recognize [[File#3]] and [[File#3:7]] in addition to the default [[File#verse-3]] form. Warning: enabling this will intercept links to headings literally named "3" or "3:7".'
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableShorthandSyntax).onChange(async (value) => {
@@ -2125,7 +2613,16 @@ var VerseMarkersSettingTab = class extends import_obsidian4.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian4.Setting(containerEl).setName("Max verses in hover preview").setDesc("Maximum number of verses to display in a range hover preview.").addText(
+    new import_obsidian5.Setting(containerEl).setName("Navigation highlight").setHeading();
+    new import_obsidian5.Setting(containerEl).setName("Keep temporary highlight until click").setDesc(
+      "When off (default), the verse highlight after navigation fades automatically after a few seconds. When on, it stays visible until you click elsewhere."
+    ).addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.keepHighlightUntilClick).onChange(async (value) => {
+        this.plugin.settings.keepHighlightUntilClick = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian5.Setting(containerEl).setName("Max verses in hover preview").setDesc("Maximum number of verses to display in a range hover preview.").addText(
       (text) => text.setPlaceholder("20").setValue(String(this.plugin.settings.hoverPreviewMaxVerses)).onChange(async (value) => {
         const num = parseInt(value, 10);
         if (!isNaN(num) && num > 0) {
@@ -2138,12 +2635,7 @@ var VerseMarkersSettingTab = class extends import_obsidian4.PluginSettingTab {
 };
 
 // src/main.ts
-var VerseMarkersPlugin = class extends import_obsidian5.Plugin {
-  constructor() {
-    super(...arguments);
-    /** Disposers for hover-preview listeners attached to rendered anchors. */
-    this.hoverDisposers = [];
-  }
+var VerseMarkersPlugin = class extends import_obsidian6.Plugin {
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new VerseMarkersSettingTab(this.app, this));
@@ -2153,9 +2645,14 @@ var VerseMarkersPlugin = class extends import_obsidian5.Plugin {
     ]);
     this.registerMarkdownPostProcessor((el, ctx) => {
       versePostProcessor(el, ctx);
-      this.wireVerseAnchors(el);
     });
     registerVersePagePreview(this);
+    registerVerseLinkNavigation(this);
+    configureVerseHighlightBehavior(() => this.settings);
+    registerVerseHighlightDismiss(this);
+    onVerseHighlightDismiss(() => clearReadingViewHighlight());
+    onVerseHighlightDismiss(() => clearActiveLivePreviewFlash());
+    registerNativeFlashPrevention(this);
     registerVerseEmbeds(this);
     registerCommands(this);
     this.registerObsidianProtocolHandler("verse-markers", async (params) => {
@@ -2164,7 +2661,7 @@ var VerseMarkersPlugin = class extends import_obsidian5.Plugin {
       if (!verse || !filePath)
         return;
       const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (!(file instanceof import_obsidian5.TFile))
+      if (!(file instanceof import_obsidian6.TFile))
         return;
       const vm = /^(\d+)([a-z]*)$/.exec(verse);
       if (!vm)
@@ -2175,46 +2672,11 @@ var VerseMarkersPlugin = class extends import_obsidian5.Plugin {
       await resolveVerseLink(this.app, file, fragment);
     });
   }
-  onunload() {
-    for (const dispose of this.hoverDisposers)
-      dispose();
-    this.hoverDisposers = [];
-  }
   async loadSettings() {
     const data = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data != null ? data : {});
   }
   async saveSettings() {
     await this.saveData(this.settings);
-  }
-  /**
-   * For each rendered anchor whose fragment is verse-N or verse-N:M, attach a
-   * click handler that invokes our verse-aware navigator. Hover previews are
-   * handled separately by the page-preview hook (registerVersePagePreview).
-   */
-  wireVerseAnchors(el) {
-    var _a, _b;
-    if (el.closest(".verse-hover-preview"))
-      return;
-    const allowShorthand = this.settings.enableShorthandSyntax;
-    const anchors = collectVerseAnchors(el, allowShorthand);
-    for (const a of anchors) {
-      const href = (_b = (_a = a.getAttribute("data-href")) != null ? _a : a.getAttribute("href")) != null ? _b : "";
-      const hashIdx = href.indexOf("#");
-      if (hashIdx === -1)
-        continue;
-      const filePart = href.slice(0, hashIdx);
-      const fragment = href.slice(hashIdx + 1);
-      const onClick = (ev) => {
-        const file = this.app.metadataCache.getFirstLinkpathDest(filePart, "");
-        if (!(file instanceof import_obsidian5.TFile))
-          return;
-        ev.preventDefault();
-        ev.stopPropagation();
-        void resolveVerseLink(this.app, file, fragment, allowShorthand);
-      };
-      a.addEventListener("click", onClick);
-      this.hoverDisposers.push(() => a.removeEventListener("click", onClick));
-    }
   }
 };

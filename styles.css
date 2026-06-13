@@ -29,6 +29,24 @@
 /* Live Preview: `[N]` before `[^id]` — same classes, replace avoids link parse. */
 .markdown-source-view.mod-cm6 .verse-marker-widget {
   display: inline;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  transition: background-color 220ms ease-in-out;
+}
+.markdown-source-view.mod-cm6 .verse-marker-widget.verse-flash-cm-active {
+  background-color: var(--text-highlight-bg);
+}
+.markdown-source-view.mod-cm6 .verse-marker-widget.verse-flash-cm-start {
+  border-top-left-radius: 0.18em;
+  border-bottom-left-radius: 0.18em;
+  padding-left: 0.1em;
+  margin-left: -0.1em;
+}
+.markdown-source-view.mod-cm6 .verse-marker-widget.verse-flash-cm-end {
+  border-top-right-radius: 0.18em;
+  border-bottom-right-radius: 0.18em;
+  padding-right: 0.1em;
+  margin-right: -0.1em;
 }
 
 /* Reading view: standalone `[//]` line is hidden (inline tokens stripped in postprocessor). */
@@ -165,33 +183,20 @@
 /* Post-navigation flash highlight.
  *
  * Implemented by wrapping the in-range text nodes in <span class="verse-flash">
- * elements at navigation time (see flashVerseRange in references.ts). We use
- * real spans (rather than the CSS Custom Highlight API) so we can give the
- * tint rounded corners, breathing-room padding, and a fade in/out — none of
- * which the ::highlight() pseudo-element accepts.
+ * elements at navigation time (see references.ts). Headings and editorial
+ * breaks are skipped so every wrapped run shares the same line height.
  *
- * Color comes from --text-highlight-bg (the variable Obsidian uses for
- * ==highlight== syntax) so it matches the active theme automatically.
- *
- * box-decoration-break: clone makes padding and (the end-cap) rounding wrap
- * cleanly onto every line of a multi-line highlighted span instead of only
- * the first and last.
- *
- * Negative horizontal margins cancel the horizontal padding so wrapping
- * the spans in/out doesn't shift surrounding text, and so adjacent spans'
- * backgrounds overlap and visually merge into one continuous highlight.
- *
- * Vertical padding is 0 deliberately: even 1px of inline vertical padding
- * can visibly extend a blockquote's line-box for the duration of the flash.
- * Rounding lives only on the outermost spans (.verse-flash-start /
- * .verse-flash-end), so middle spans merge seamlessly into the block
- * instead of rendering as an alternating row of chips. */
+ * Vertical padding is 0 on all runs; only the outer caps (.verse-flash-start /
+ * .verse-flash-end) add horizontal inset. Interior spans merge into one band. */
 .verse-flash {
   border-radius: 0;
-  padding-top: 0.08em;
-  padding-bottom: 0.08em;
+  padding-top: 0;
+  padding-bottom: 0;
   margin: 0;
   background-color: transparent;
+  font-size: inherit;
+  line-height: inherit;
+  vertical-align: baseline;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
   transition: background-color 220ms ease-in-out;
@@ -215,7 +220,12 @@
 /* Live Preview: navigation flash via CM6 mark decorations (flashLivePreview.ts). */
 .markdown-source-view.mod-cm6 .verse-flash-cm {
   background-color: transparent;
-  border-radius: 0.18em;
+  border-radius: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: inherit;
+  line-height: inherit;
+  vertical-align: baseline;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
   transition: background-color 220ms ease-in-out;
@@ -223,11 +233,26 @@
 .markdown-source-view.mod-cm6 .verse-flash-cm-active {
   background-color: var(--text-highlight-bg);
 }
-
-/* Note: Obsidian's native scroll-flash is suppressed at the JS layer
- * (suppressNativeFlashFor in references.ts). That approach actively
- * strips the native flash class the moment Obsidian applies it, so we
- * don't need a CSS override here. CSS-only suppression couldn't
- * distinguish between "navigation was triggered by our plugin" and
- * "navigation was triggered by Obsidian elsewhere", so we'd lose the
- * native flash for backlinks/search results too — undesirable. */
+/* Marker color spans inside a flash run must not paint their own fill. */
+.markdown-source-view.mod-cm6 .verse-flash-cm .verse-marker,
+.markdown-source-view.mod-cm6 .verse-flash-cm .verse-marker-bracket {
+  background-color: transparent;
+}
+.markdown-source-view.mod-cm6 .verse-flash-cm-start {
+  border-top-left-radius: 0.18em;
+  border-bottom-left-radius: 0.18em;
+  padding-left: 0.1em;
+  margin-left: -0.1em;
+}
+.markdown-source-view.mod-cm6 .verse-flash-cm-end {
+  border-top-right-radius: 0.18em;
+  border-bottom-right-radius: 0.18em;
+  padding-right: 0.1em;
+  margin-right: -0.1em;
+}
+/* Keep cap radius on the outer flash span, not inner marker color spans. */
+.markdown-source-view.mod-cm6 .verse-flash-cm-end .verse-marker,
+.markdown-source-view.mod-cm6 .verse-flash-cm-end .verse-marker-bracket {
+  background-color: transparent;
+  border-radius: 0;
+}

@@ -13,12 +13,18 @@ export interface VerseMarkersSettings {
    * with real headings that happen to be numeric. See detection.ts.
    */
   enableShorthandSyntax: boolean;
+  /**
+   * When true, the post-navigation verse highlight stays until the user
+   * clicks elsewhere. When false (default), it auto-fades after a few seconds.
+   */
+  keepHighlightUntilClick: boolean;
 }
 
 export const DEFAULT_SETTINGS: VerseMarkersSettings = {
   enableHoverPreviews: true,
   hoverPreviewMaxVerses: 20,
   enableShorthandSyntax: false,
+  keepHighlightUntilClick: false,
 };
 
 export class VerseMarkersSettingTab extends PluginSettingTab {
@@ -72,6 +78,23 @@ export class VerseMarkersSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.enableShorthandSyntax)
           .onChange(async (value) => {
             this.plugin.settings.enableShorthandSyntax = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl).setName("Navigation highlight").setHeading();
+
+    new Setting(containerEl)
+      .setName("Keep temporary highlight until click")
+      .setDesc(
+        "When off (default), the verse highlight after navigation fades automatically after a few seconds. " +
+          "When on, it stays visible until you click elsewhere."
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.keepHighlightUntilClick)
+          .onChange(async (value) => {
+            this.plugin.settings.keepHighlightUntilClick = value;
             await this.plugin.saveSettings();
           })
       );
