@@ -986,8 +986,10 @@ function waitForElementById(
   const existing = verseAnchorIn(root, id);
   if (existing) return Promise.resolve(existing);
 
-  const observeTarget =
-    root instanceof Document ? root.body : (root as Element);
+  const rootNode = root as Node;
+  const observeTarget = rootNode.instanceOf(Document)
+    ? (rootNode as Document).body
+    : (root as Element);
 
   return new Promise((resolve) => {
     let settled = false;
@@ -1329,10 +1331,9 @@ function buildVerseFlashRanges(
       } else if (next) {
         range.setEndBefore(next);
       } else {
-        const last =
-          root instanceof Element
-            ? root.lastElementChild ?? root.lastChild
-            : root.lastChild;
+        const last = (root as Node).instanceOf(Element)
+          ? (root as Element).lastElementChild ?? root.lastChild
+          : root.lastChild;
         if (!last) continue;
         range.setEndAfter(last);
       }

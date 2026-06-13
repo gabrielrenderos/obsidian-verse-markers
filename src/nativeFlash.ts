@@ -118,7 +118,7 @@ function patchEditor(editor: Editor): void {
 }
 
 function patchMarkdownView(view: MarkdownView | null | undefined): void {
-  view?.editor && patchEditor(view.editor);
+  if (view?.editor) patchEditor(view.editor);
 }
 
 /** Block native `is-flashing` on editors while our verse highlight is active. */

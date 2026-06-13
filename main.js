@@ -1245,7 +1245,8 @@ function patchEditor(editor) {
   };
 }
 function patchMarkdownView(view) {
-  (view == null ? void 0 : view.editor) && patchEditor(view.editor);
+  if (view == null ? void 0 : view.editor)
+    patchEditor(view.editor);
 }
 function registerNativeFlashPrevention(plugin) {
   plugin.app.workspace.iterateAllLeaves((leaf) => {
@@ -2034,7 +2035,8 @@ function waitForElementById(id, timeoutMs, root) {
   const existing = verseAnchorIn(root, id);
   if (existing)
     return Promise.resolve(existing);
-  const observeTarget = root instanceof Document ? root.body : root;
+  const rootNode = root;
+  const observeTarget = rootNode.instanceOf(Document) ? rootNode.body : root;
   return new Promise((resolve) => {
     let settled = false;
     const finish = (el) => {
@@ -2266,7 +2268,7 @@ function buildVerseFlashRanges(segments, root) {
       } else if (next) {
         range.setEndBefore(next);
       } else {
-        const last = root instanceof Element ? (_a = root.lastElementChild) != null ? _a : root.lastChild : root.lastChild;
+        const last = root.instanceOf(Element) ? (_a = root.lastElementChild) != null ? _a : root.lastChild : root.lastChild;
         if (!last)
           continue;
         range.setEndAfter(last);
@@ -2418,15 +2420,15 @@ var VerseMarkerWidget = class extends import_view3.WidgetType {
     return true;
   }
   toDOM() {
-    const wrap = document.createElement("span");
+    const wrap = activeDocument.createElement("span");
     wrap.className = ["verse-marker-widget", this.flashClass].filter(Boolean).join(" ");
-    const open = document.createElement("span");
+    const open = activeDocument.createElement("span");
     open.className = "verse-marker-bracket";
     open.textContent = "[";
-    const label = document.createElement("span");
+    const label = activeDocument.createElement("span");
     label.className = "verse-marker";
     label.textContent = this.label;
-    const close = document.createElement("span");
+    const close = activeDocument.createElement("span");
     close.className = "verse-marker-bracket";
     close.textContent = "]";
     wrap.append(open, label, close);

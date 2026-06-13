@@ -30,7 +30,6 @@ import {
   registerVerseHighlightDismiss,
   onVerseHighlightDismiss,
   configureVerseHighlightBehavior,
-  notifyVerseHighlightShown,
 } from "./highlightDismiss";
 import { registerNativeFlashPrevention } from "./nativeFlash";
 import { clearReadingViewHighlight } from "./references";

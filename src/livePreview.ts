@@ -58,17 +58,17 @@ class VerseMarkerWidget extends WidgetType {
   }
 
   toDOM(): HTMLElement {
-    const wrap = document.createElement("span");
+    const wrap = activeDocument.createElement("span");
     wrap.className = ["verse-marker-widget", this.flashClass]
       .filter(Boolean)
       .join(" ");
-    const open = document.createElement("span");
+    const open = activeDocument.createElement("span");
     open.className = "verse-marker-bracket";
     open.textContent = "[";
-    const label = document.createElement("span");
+    const label = activeDocument.createElement("span");
     label.className = "verse-marker";
     label.textContent = this.label;
-    const close = document.createElement("span");
+    const close = activeDocument.createElement("span");
     close.className = "verse-marker-bracket";
     close.textContent = "]";
     wrap.append(open, label, close);
