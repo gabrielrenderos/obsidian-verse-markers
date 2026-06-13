@@ -247,6 +247,7 @@ obsidian://verse-markers?file=Notes/Gospel%20of%20John.md&verse=3&part=a
 | Enable range hover previews               | On      | Show verse text in a popover when hovering `verse-N:M` links.       |
 | Max verses in hover preview               | 20      | Cap on how many verses the popover will quote.                      |
 | Enable shorthand reference syntax         | Off     | Also accept `[[File#3]]` / `[[File#3:7]]`. See collision warning.   |
+| Keep temporary highlight until click        | Off     | Navigation highlight auto-fades after ~2s; on = stays until click.  |
 
 ## Styling
 
