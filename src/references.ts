@@ -988,7 +988,7 @@ function waitForElementById(
 
   const rootNode = root as Node;
   const observeTarget = rootNode.instanceOf(Document)
-    ? (rootNode as Document).body
+    ? rootNode.body
     : (root as Element);
 
   return new Promise((resolve) => {

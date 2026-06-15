@@ -210,14 +210,16 @@ export function charOffsetForLine(text: string, lineIndex: number): number {
 }
 
 /**
- * True when text at `markerEnd` begins with whitespace and an inline footnote
- * ref (`[^id]`). `[1] [^1]` is otherwise parsed as a reference link in LP.
+ * True when a closed verse marker at `markerEnd` is immediately followed by
+ * exactly one space and an opening bracket (` [`). The Live Preview replace
+ * widget is applied only in that case — not for other spaces, brackets, or
+ * partial footnote tokens alone.
  */
 export function isFollowedByFootnoteRef(
   text: string,
   markerEnd: number
 ): boolean {
-  return /^\s+\[\^[^\]\s]+\]/.test(text.slice(markerEnd));
+  return /^ \[/.test(text.slice(markerEnd));
 }
 
 /**

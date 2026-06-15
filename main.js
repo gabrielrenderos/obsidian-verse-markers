@@ -123,7 +123,7 @@ function charOffsetForLine(text, lineIndex) {
   return text.length;
 }
 function isFollowedByFootnoteRef(text, markerEnd) {
-  return /^\s+\[\^[^\]\s]+\]/.test(text.slice(markerEnd));
+  return /^ \[/.test(text.slice(markerEnd));
 }
 function verseProcessStateAt(text, endOffset) {
   const state = { inVerseSpan: false, inVerseMode: true };
@@ -2406,6 +2406,26 @@ function registerVerseEmbeds(plugin) {
 // src/livePreview.ts
 var import_view3 = require("@codemirror/view");
 var import_state2 = require("@codemirror/state");
+var VerseMarkerBracketWidget = class extends import_view3.WidgetType {
+  constructor(bracket, flashClass) {
+    super();
+    this.bracket = bracket;
+    this.flashClass = flashClass;
+  }
+  eq(other) {
+    return other instanceof VerseMarkerBracketWidget && other.bracket === this.bracket && other.flashClass === this.flashClass;
+  }
+  /** Let CM6 process mouse events natively (posAtCoords placement). */
+  ignoreEvent() {
+    return false;
+  }
+  toDOM() {
+    const wrap = activeDocument.createElement("span");
+    wrap.className = ["verse-marker-bracket", "verse-marker-widget", this.flashClass].filter(Boolean).join(" ");
+    wrap.textContent = this.bracket;
+    return wrap;
+  }
+};
 var VerseMarkerWidget = class extends import_view3.WidgetType {
   constructor(label, flashClass) {
     super();
@@ -2415,9 +2435,9 @@ var VerseMarkerWidget = class extends import_view3.WidgetType {
   eq(other) {
     return other instanceof VerseMarkerWidget && other.label === this.label && other.flashClass === this.flashClass;
   }
-  /** Pass clicks/edits through; footnote `[^1]` after the widget stays interactive. */
+  /** Let CM6 process mouse events natively (posAtCoords placement). */
   ignoreEvent() {
-    return true;
+    return false;
   }
   toDOM() {
     const wrap = activeDocument.createElement("span");
@@ -2435,32 +2455,108 @@ var VerseMarkerWidget = class extends import_view3.WidgetType {
     return wrap;
   }
 };
+function buildDecorations(view) {
+  const specs = collectDecorationSpecs(view);
+  const allBuilder = new import_state2.RangeSetBuilder();
+  for (const { from, to, decoration } of specs) {
+    allBuilder.add(from, to, decoration);
+  }
+  return { all: allBuilder.finish() };
+}
 function markerInsideHighlight(from, to, highlights) {
   return highlights.some((h) => from >= h.start && to <= h.end);
 }
-function verseMarkerLabel2(token) {
-  const { number, part } = parseMarkerToken(token);
-  return `${number}${part != null ? part : ""}`;
+function widgetFlashClass(markerFrom, markerTo) {
+  return flashClassesForWidget(markerFrom, markerTo);
+}
+function selectionTouchesMarker(view, from, to) {
+  return view.state.selection.ranges.some(
+    (range) => range.from <= to && range.to >= from
+  );
+}
+function selectionTouchesFootnoteWidgetMarker(view) {
+  const doc = view.state.doc;
+  const fullText = doc.toString();
+  const re = getVerseRegex();
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from;
+    while (pos < to) {
+      const m = execVerseMarker(re, doc.sliceString(pos, to));
+      if (!m)
+        break;
+      const matchFrom = pos + m.index;
+      const matchTo = matchFrom + m[0].length;
+      if (isFollowedByFootnoteRef(fullText, matchTo) && selectionTouchesMarker(view, matchFrom, matchTo)) {
+        return true;
+      }
+      pos = matchTo;
+    }
+  }
+  return false;
+}
+function bracketReplaceDecoration(bracket, flashClass) {
+  return import_view3.Decoration.replace({
+    widget: new VerseMarkerBracketWidget(bracket, flashClass),
+    inclusive: false,
+    inclusiveStart: true,
+    inclusiveEnd: true,
+    block: false
+  });
+}
+function pushFootnoteWidgetMarks(specs, matchFrom, matchTo, label) {
+  specs.push({
+    from: matchFrom,
+    to: matchTo,
+    decoration: import_view3.Decoration.replace({
+      widget: new VerseMarkerWidget(
+        label,
+        widgetFlashClass(matchFrom, matchTo)
+      ),
+      inclusive: false,
+      inclusiveStart: true,
+      inclusiveEnd: true,
+      block: false
+    })
+  });
+}
+function pushFootnoteEditingMarks(specs, matchFrom, matchTo) {
+  const flashClass = widgetFlashClass(matchFrom, matchTo);
+  const innerFrom = matchFrom + 1;
+  const innerTo = matchTo - 1;
+  specs.push({
+    from: matchFrom,
+    to: matchFrom + 1,
+    decoration: bracketReplaceDecoration("[", flashClass)
+  });
+  if (innerTo > innerFrom) {
+    specs.push({
+      from: innerFrom,
+      to: innerTo,
+      decoration: import_view3.Decoration.mark({ class: "verse-marker" })
+    });
+  }
+  specs.push({
+    from: matchTo - 1,
+    to: matchTo,
+    decoration: bracketReplaceDecoration("]", flashClass)
+  });
 }
 function pushBracketLabelMarks(specs, tokenFrom, tokenTo) {
   specs.push(
     {
       from: tokenFrom,
       to: tokenFrom + 1,
-      decoration: import_view3.Decoration.mark({ class: "verse-marker-bracket" }),
-      atomic: false
+      decoration: import_view3.Decoration.mark({ class: "verse-marker-bracket" })
     },
     {
       from: tokenFrom + 1,
       to: tokenTo - 1,
-      decoration: import_view3.Decoration.mark({ class: "verse-marker" }),
-      atomic: false
+      decoration: import_view3.Decoration.mark({ class: "verse-marker" })
     },
     {
       from: tokenTo - 1,
       to: tokenTo,
-      decoration: import_view3.Decoration.mark({ class: "verse-marker-bracket" }),
-      atomic: false
+      decoration: import_view3.Decoration.mark({ class: "verse-marker-bracket" })
     }
   );
 }
@@ -2487,8 +2583,7 @@ function collectDecorationSpecs(view) {
           specs.push({
             from: breakFrom + 1,
             to: breakTo - 1,
-            decoration: import_view3.Decoration.mark({ class: "verse-marker" }),
-            atomic: false
+            decoration: import_view3.Decoration.mark({ class: "verse-marker" })
           });
         } else {
           pushBracketLabelMarks(specs, breakFrom, breakTo);
@@ -2499,20 +2594,16 @@ function collectDecorationSpecs(view) {
       const matchFrom = markerIdx;
       const matchTo = markerIdx + m[0].length;
       const beforeFootnote = isFollowedByFootnoteRef(fullText, matchTo);
-      if (beforeFootnote) {
-        specs.push({
-          from: matchFrom,
-          to: matchTo,
-          decoration: import_view3.Decoration.replace({
-            widget: new VerseMarkerWidget(
-              verseMarkerLabel2(m[0]),
-              flashClassesForWidget(matchFrom, matchTo)
-            ),
-            inclusive: false,
-            block: false
-          }),
-          atomic: true
-        });
+      const touching = beforeFootnote && selectionTouchesMarker(view, matchFrom, matchTo);
+      if (beforeFootnote && touching) {
+        pushFootnoteEditingMarks(specs, matchFrom, matchTo);
+      } else if (beforeFootnote) {
+        pushFootnoteWidgetMarks(
+          specs,
+          matchFrom,
+          matchTo,
+          m[0].slice(1, -1)
+        );
       } else {
         pushBracketLabelMarks(specs, matchFrom, matchTo);
       }
@@ -2521,20 +2612,6 @@ function collectDecorationSpecs(view) {
   }
   specs.sort((a, b) => a.from - b.from);
   return specs;
-}
-function buildDecorations(view) {
-  const specs = collectDecorationSpecs(view);
-  const allBuilder = new import_state2.RangeSetBuilder();
-  const atomicBuilder = new import_state2.RangeSetBuilder();
-  for (const { from, to, decoration, atomic } of specs) {
-    allBuilder.add(from, to, decoration);
-    if (atomic)
-      atomicBuilder.add(from, to, decoration);
-  }
-  return {
-    all: allBuilder.finish(),
-    atomic: atomicBuilder.finish()
-  };
 }
 function transactionHasFlashChange(tr) {
   for (const e of tr.effects) {
@@ -2545,31 +2622,27 @@ function transactionHasFlashChange(tr) {
 }
 var VerseMarkerLivePreviewPlugin = class {
   constructor(view) {
-    const built = buildDecorations(view);
-    this.decorations = built.all;
-    this.atomicDeco = built.atomic;
+    /** Previous frame: caret was on a footnote-widget `[N]`. */
+    this.editingFootnoteWidget = false;
+    this.decorations = buildDecorations(view).all;
+    this.editingFootnoteWidget = selectionTouchesFootnoteWidgetMarker(view);
   }
   update(update) {
     const flashChanged = update.transactions.some(transactionHasFlashChange);
-    if (update.docChanged || update.viewportChanged || flashChanged) {
-      const built = buildDecorations(update.view);
-      this.decorations = built.all;
-      this.atomicDeco = built.atomic;
+    const touching = selectionTouchesFootnoteWidgetMarker(update.view);
+    const cursorEntersOrLeavesWidget = update.selectionSet && (touching || this.editingFootnoteWidget);
+    this.editingFootnoteWidget = touching;
+    if (update.docChanged || update.viewportChanged || flashChanged || cursorEntersOrLeavesWidget) {
+      this.decorations = buildDecorations(update.view).all;
     }
   }
 };
 function verseMarkerLivePreviewExtension() {
-  let plugin;
-  plugin = import_view3.ViewPlugin.fromClass(VerseMarkerLivePreviewPlugin, {
-    decorations: (p) => p.decorations,
-    provide: () => import_view3.EditorView.atomicRanges.of(
-      (view) => {
-        var _a, _b;
-        return (_b = (_a = view.plugin(plugin)) == null ? void 0 : _a.atomicDeco) != null ? _b : import_view3.Decoration.none;
-      }
-    )
-  });
-  return plugin;
+  return import_state2.Prec.highest(
+    import_view3.ViewPlugin.fromClass(VerseMarkerLivePreviewPlugin, {
+      decorations: (p) => p.decorations
+    })
+  );
 }
 
 // src/settings.ts
