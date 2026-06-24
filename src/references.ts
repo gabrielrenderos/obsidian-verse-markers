@@ -178,10 +178,11 @@ function buildSingleCore(
 
   // Plain single `[N]`: raw slice preserves ==highlight== wrapping the marker
   // (when the highlight opens before it), so popover/embed match reading view.
+  // Raw text already includes blockquote `>` via lineLeadStart — do not re-wrap.
   if (fragments.length === 1 && fragments[0].part === null) {
     const raw = getVerseRangeRawText(content, verse, verse);
     if (raw && raw.length > 0) {
-      return applyBlockquotePrefix(raw, prefix);
+      return raw;
     }
   }
 

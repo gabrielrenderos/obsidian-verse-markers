@@ -1606,7 +1606,7 @@ function buildSingleCore(content, verse, part) {
   if (fragments.length === 1 && fragments[0].part === null) {
     const raw = getVerseRangeRawText(content, verse, verse);
     if (raw && raw.length > 0) {
-      return applyBlockquotePrefix(raw, prefix);
+      return raw;
     }
   }
   const blocks = fragments.filter((f) => f.content.length > 0).map((f) => {
