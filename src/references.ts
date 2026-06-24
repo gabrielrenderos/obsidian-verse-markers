@@ -91,7 +91,7 @@ export function applyFootnotePreviewDisplay(
   if (showDefinitionBlock) return;
   for (const selector of FOOTNOTE_DEFINITION_BLOCK_SELECTORS) {
     root.querySelectorAll(selector).forEach((el) => {
-      if (el instanceof HTMLElement) el.hide();
+      if (el.instanceOf(HTMLElement)) el.hide();
     });
   }
 }
