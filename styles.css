@@ -180,6 +180,14 @@
   font-size: 0.9em;
 }
 
+/* Popover/embed: hide the definition list while keeping inline refs hoverable. */
+.verse-hide-footnote-defs section.footnotes,
+.verse-hide-footnote-defs .footnotes,
+.verse-hide-footnote-defs ol.footnote-list,
+.verse-hide-footnote-defs hr.footnotes-sep {
+  display: none !important;
+}
+
 /* Post-navigation flash highlight.
  *
  * Implemented by wrapping the in-range text nodes in <span class="verse-flash">

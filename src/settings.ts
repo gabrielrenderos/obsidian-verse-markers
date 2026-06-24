@@ -2,6 +2,7 @@
 // Copyright (C) 2025 Gabriel Renderos
 
 import { App, PluginSettingTab, Setting } from "obsidian";
+import { refreshAllVerseEmbeds } from "./embeds";
 import type VerseMarkersPlugin from "./main";
 
 export interface VerseMarkersSettings {
@@ -18,6 +19,10 @@ export interface VerseMarkersSettings {
    * clicks elsewhere. When false (default), it auto-fades after a few seconds.
    */
   keepHighlightUntilClick: boolean;
+  /** Append footnote definitions to verse hover popovers. */
+  showFootnotesInPopovers: boolean;
+  /** Append footnote definitions to verse embeds. */
+  showFootnotesInEmbeds: boolean;
 }
 
 export const DEFAULT_SETTINGS: VerseMarkersSettings = {
@@ -25,6 +30,8 @@ export const DEFAULT_SETTINGS: VerseMarkersSettings = {
   hoverPreviewMaxVerses: 20,
   enableShorthandSyntax: false,
   keepHighlightUntilClick: false,
+  showFootnotesInPopovers: true,
+  showFootnotesInEmbeds: true,
 };
 
 export class VerseMarkersSettingTab extends PluginSettingTab {
@@ -112,6 +119,37 @@ export class VerseMarkersSettingTab extends PluginSettingTab {
               this.plugin.settings.hoverPreviewMaxVerses = num;
               await this.plugin.saveSettings();
             }
+          })
+      );
+
+    new Setting(containerEl).setName("Show footnotes").setHeading();
+
+    new Setting(containerEl)
+      .setName("Show footnotes in popovers")
+      .setDesc(
+        "Show the footnote list at the bottom of hover previews. Footnote references in the verse text stay hoverable either way."
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.showFootnotesInPopovers)
+          .onChange(async (value) => {
+            this.plugin.settings.showFootnotesInPopovers = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Show footnotes in embeds")
+      .setDesc(
+        "Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds."
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.showFootnotesInEmbeds)
+          .onChange(async (value) => {
+            this.plugin.settings.showFootnotesInEmbeds = value;
+            await this.plugin.saveSettings();
+            refreshAllVerseEmbeds();
           })
       );
   }

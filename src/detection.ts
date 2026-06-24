@@ -999,6 +999,47 @@ export function appendMissingFootnoteDefinitions(
   return `${slice}\n\n${appended.join("\n\n")}`;
 }
 
+function footnoteIdHasDefinition(text: string, id: string): boolean {
+  for (const line of text.split("\n")) {
+    const head = FOOTNOTE_DEF_HEAD_REGEX.exec(line);
+    if (head && head[1] === id) return true;
+  }
+  return false;
+}
+
+/**
+ * Removes `[^id]` references that have no definition in `slice` or `fullText`,
+ * so they do not render as bare numbers when definitions are omitted.
+ */
+export function stripUnresolvedFootnoteRefs(
+  slice: string,
+  fullText: string
+): string {
+  const refRe = new RegExp(FOOTNOTE_REF_REGEX.source, FOOTNOTE_REF_REGEX.flags);
+  return slice.replace(refRe, (match, id: string) => {
+    if (footnoteIdHasDefinition(slice, id) || footnoteIdHasDefinition(fullText, id)) {
+      return match;
+    }
+    return "";
+  });
+}
+
+/** Removes every inline `[^id]` reference from `slice`. */
+export function stripAllFootnoteRefs(slice: string): string {
+  const refRe = new RegExp(FOOTNOTE_REF_REGEX.source, FOOTNOTE_REF_REGEX.flags);
+  return slice.replace(refRe, "");
+}
+
+/**
+ * Appends missing footnote definitions, then drops refs that still cannot resolve.
+ */
+export function finalizePreviewMarkdown(slice: string, fullText: string): string {
+  return stripUnresolvedFootnoteRefs(
+    appendMissingFootnoteDefinitions(slice, fullText),
+    fullText
+  );
+}
+
 /**
  * Returns the 0-indexed source line containing the marker for `verseNumber`,
  * or null if the verse is not present.

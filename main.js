@@ -600,6 +600,33 @@ function appendMissingFootnoteDefinitions(slice, fullText) {
 
 ${appended.join("\n\n")}`;
 }
+function footnoteIdHasDefinition(text, id) {
+  for (const line of text.split("\n")) {
+    const head = FOOTNOTE_DEF_HEAD_REGEX.exec(line);
+    if (head && head[1] === id)
+      return true;
+  }
+  return false;
+}
+function stripUnresolvedFootnoteRefs(slice, fullText) {
+  const refRe = new RegExp(FOOTNOTE_REF_REGEX.source, FOOTNOTE_REF_REGEX.flags);
+  return slice.replace(refRe, (match, id) => {
+    if (footnoteIdHasDefinition(slice, id) || footnoteIdHasDefinition(fullText, id)) {
+      return match;
+    }
+    return "";
+  });
+}
+function stripAllFootnoteRefs(slice) {
+  const refRe = new RegExp(FOOTNOTE_REF_REGEX.source, FOOTNOTE_REF_REGEX.flags);
+  return slice.replace(refRe, "");
+}
+function finalizePreviewMarkdown(slice, fullText) {
+  return stripUnresolvedFootnoteRefs(
+    appendMissingFootnoteDefinitions(slice, fullText),
+    fullText
+  );
+}
 function findVerseLine(text, verseNumber) {
   const re = getVerseRegex();
   let match;
@@ -1544,6 +1571,22 @@ function partToIndex2(part) {
 function verseMarkerLabel(label) {
   return `<span class="verse-marker">${label}</span>`;
 }
+var FOOTNOTE_DEFINITION_BLOCK_SELECTORS = [
+  "section.footnotes",
+  ".footnotes",
+  "ol.footnote-list"
+];
+function applyFootnotePreviewDisplay(root, showDefinitionBlock) {
+  root.toggleClass("verse-hide-footnote-defs", !showDefinitionBlock);
+  if (showDefinitionBlock)
+    return;
+  for (const selector of FOOTNOTE_DEFINITION_BLOCK_SELECTORS) {
+    root.querySelectorAll(selector).forEach((el) => {
+      if (el instanceof HTMLElement)
+        el.hide();
+    });
+  }
+}
 function applyBlockquotePrefix(text, prefix) {
   if (!prefix)
     return text;
@@ -1618,7 +1661,7 @@ function buildSingleCore(content, verse, part) {
     return null;
   return blocks.join("\n\n");
 }
-async function buildSegmentsPreviewMarkdown(app, file, segments, maxVerses) {
+async function buildSegmentsPreviewMarkdown(app, file, segments, maxVerses, showFootnotes = true) {
   const content = await app.vault.cachedRead(file);
   const blocks = [];
   let remaining = maxVerses;
@@ -1649,7 +1692,10 @@ async function buildSegmentsPreviewMarkdown(app, file, segments, maxVerses) {
   }
   if (blocks.length === 0)
     return null;
-  return appendMissingFootnoteDefinitions(blocks.join("\n\n"), content);
+  const markdown = blocks.join("\n\n");
+  if (!showFootnotes)
+    return stripAllFootnoteRefs(markdown);
+  return finalizePreviewMarkdown(markdown, content);
 }
 function getPagePreviewInstance(app) {
   var _a, _b, _c;
@@ -1807,6 +1853,7 @@ async function renderVersePopover(plugin, popover, isAlive, file, fragment, sour
   );
   if (!isAlive())
     return;
+  applyFootnotePreviewDisplay(preview, plugin.settings.showFootnotesInPopovers);
   const openLink = embed.createEl("a", {
     cls: "markdown-embed-link",
     attr: { "aria-label": "Open link" }
@@ -2287,6 +2334,12 @@ function buildVerseFlashRanges(segments, root) {
 
 // src/embeds.ts
 var import_obsidian4 = require("obsidian");
+var verseEmbedInstances = /* @__PURE__ */ new Set();
+function refreshAllVerseEmbeds() {
+  for (const embed of verseEmbedInstances) {
+    void embed.reload();
+  }
+}
 function wrapAsDocumentBlocks(preview) {
   const doc = preview.ownerDocument;
   for (const child of Array.from(preview.children)) {
@@ -2306,7 +2359,13 @@ var VerseEmbed = class extends import_obsidian4.Component {
     this.renderToken = 0;
   }
   onload() {
+    verseEmbedInstances.add(this);
+    this.register(() => verseEmbedInstances.delete(this));
     void this.render();
+  }
+  /** Re-render after settings change or source file update. */
+  async reload() {
+    await this.render();
   }
   /** Obsidian calls this to (re)render when the source file changes. */
   async loadFile() {
@@ -2322,7 +2381,8 @@ var VerseEmbed = class extends import_obsidian4.Component {
         this.plugin.app,
         this.file,
         segments,
-        this.plugin.settings.hoverPreviewMaxVerses
+        this.plugin.settings.hoverPreviewMaxVerses,
+        this.plugin.settings.showFootnotesInEmbeds
       );
     }
     if (myToken !== this.renderToken)
@@ -2651,7 +2711,9 @@ var DEFAULT_SETTINGS = {
   enableHoverPreviews: true,
   hoverPreviewMaxVerses: 20,
   enableShorthandSyntax: false,
-  keepHighlightUntilClick: false
+  keepHighlightUntilClick: false,
+  showFootnotesInPopovers: true,
+  showFootnotesInEmbeds: true
 };
 var VerseMarkersSettingTab = class extends import_obsidian5.PluginSettingTab {
   constructor(app, plugin) {
@@ -2704,6 +2766,24 @@ var VerseMarkersSettingTab = class extends import_obsidian5.PluginSettingTab {
           this.plugin.settings.hoverPreviewMaxVerses = num;
           await this.plugin.saveSettings();
         }
+      })
+    );
+    new import_obsidian5.Setting(containerEl).setName("Show footnotes").setHeading();
+    new import_obsidian5.Setting(containerEl).setName("Show footnotes in popovers").setDesc(
+      "Show the footnote list at the bottom of hover previews. Footnote references in the verse text stay hoverable either way."
+    ).addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.showFootnotesInPopovers).onChange(async (value) => {
+        this.plugin.settings.showFootnotesInPopovers = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian5.Setting(containerEl).setName("Show footnotes in embeds").setDesc(
+      "Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds."
+    ).addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.showFootnotesInEmbeds).onChange(async (value) => {
+        this.plugin.settings.showFootnotesInEmbeds = value;
+        await this.plugin.saveSettings();
+        refreshAllVerseEmbeds();
       })
     );
   }

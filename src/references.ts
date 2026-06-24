@@ -30,9 +30,10 @@ import {
   type OpenViewState,
 } from "obsidian";
 import {
-  appendMissingFootnoteDefinitions,
   findVerseLine,
   firstFragmentPart,
+  finalizePreviewMarkdown,
+  stripAllFootnoteRefs,
   getVerseContent,
   getVerseFragments,
   getVerseParts,
@@ -69,6 +70,30 @@ function partToIndex(part: string): number {
  */
 function verseMarkerLabel(label: string): string {
   return `<span class="verse-marker">${label}</span>`;
+}
+
+/** Selectors for the rendered footnote-definition block at the end of a preview. */
+const FOOTNOTE_DEFINITION_BLOCK_SELECTORS = [
+  "section.footnotes",
+  ".footnotes",
+  "ol.footnote-list",
+] as const;
+
+/**
+ * Toggles visibility of the appended footnote-definition section. Inline
+ * `[^id]` refs stay wired; only the bottom definition list is hidden.
+ */
+export function applyFootnotePreviewDisplay(
+  root: HTMLElement,
+  showDefinitionBlock: boolean
+): void {
+  root.toggleClass("verse-hide-footnote-defs", !showDefinitionBlock);
+  if (showDefinitionBlock) return;
+  for (const selector of FOOTNOTE_DEFINITION_BLOCK_SELECTORS) {
+    root.querySelectorAll(selector).forEach((el) => {
+      if (el instanceof HTMLElement) el.hide();
+    });
+  }
 }
 
 /**
@@ -213,7 +238,7 @@ export async function buildRangePreviewMarkdown(
   const content = await app.vault.cachedRead(file);
   const core = buildRangeCore(content, start, end, maxVerses, startPart, endPart);
   if (!core) return null;
-  return appendMissingFootnoteDefinitions(core.markdown, content);
+  return finalizePreviewMarkdown(core.markdown, content);
 }
 
 /**
@@ -229,7 +254,7 @@ export async function buildSinglePreviewMarkdown(
   const content = await app.vault.cachedRead(file);
   const core = buildSingleCore(content, verse, part);
   if (!core) return null;
-  return appendMissingFootnoteDefinitions(core, content);
+  return finalizePreviewMarkdown(core, content);
 }
 
 /**
@@ -245,7 +270,8 @@ export async function buildSegmentsPreviewMarkdown(
   app: App,
   file: TFile,
   segments: VerseSegment[],
-  maxVerses: number
+  maxVerses: number,
+  showFootnotes = true
 ): Promise<string | null> {
   const content = await app.vault.cachedRead(file);
   const blocks: string[] = [];
@@ -277,7 +303,9 @@ export async function buildSegmentsPreviewMarkdown(
   }
 
   if (blocks.length === 0) return null;
-  return appendMissingFootnoteDefinitions(blocks.join("\n\n"), content);
+  const markdown = blocks.join("\n\n");
+  if (!showFootnotes) return stripAllFootnoteRefs(markdown);
+  return finalizePreviewMarkdown(markdown, content);
 }
 
 /* ---------------------------------------------------------------------------
@@ -551,6 +579,8 @@ async function renderVersePopover(
     popover
   );
   if (!isAlive()) return;
+
+  applyFootnotePreviewDisplay(preview, plugin.settings.showFootnotesInPopovers);
 
   // Corner "open" affordance, same chrome class as the native popover.
   const openLink = embed.createEl("a", {

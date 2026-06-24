@@ -29,6 +29,15 @@ import { styleVerseMarkers } from "./postprocessor";
 import { convertHighlightSyntaxToHtml } from "./highlights";
 import type VerseMarkersPlugin from "./main";
 
+const verseEmbedInstances = new Set<VerseEmbed>();
+
+/** Re-render every verse embed on the current page (e.g. after settings change). */
+export function refreshAllVerseEmbeds(): void {
+  for (const embed of verseEmbedInstances) {
+    void embed.reload();
+  }
+}
+
 /** Minimal shape of the context Obsidian passes to an embed creator. */
 interface EmbedContext {
   app: App;
@@ -98,7 +107,14 @@ class VerseEmbed extends Component {
   }
 
   onload(): void {
+    verseEmbedInstances.add(this);
+    this.register(() => verseEmbedInstances.delete(this));
     void this.render();
+  }
+
+  /** Re-render after settings change or source file update. */
+  async reload(): Promise<void> {
+    await this.render();
   }
 
   /** Obsidian calls this to (re)render when the source file changes. */
@@ -117,7 +133,8 @@ class VerseEmbed extends Component {
         this.plugin.app,
         this.file,
         segments,
-        this.plugin.settings.hoverPreviewMaxVerses
+        this.plugin.settings.hoverPreviewMaxVerses,
+        this.plugin.settings.showFootnotesInEmbeds
       );
     }
 
@@ -180,11 +197,6 @@ class VerseEmbed extends Component {
     // post-processor's anchor pass, which DOES run inside embeds.
     styleVerseMarkers(preview);
 
-    // Match the document's reading-view structure: Obsidian wraps every
-    // top-level block in a `div.el-<tag>` (.el-blockquote, .el-h3, .el-p, …)
-    // which is what carries its block spacing. MarkdownRenderer.render doesn't
-    // add those wrappers, so we add them ourselves — making blockquotes,
-    // headings, paragraphs, lists, etc. lay out exactly like the live note.
     wrapAsDocumentBlocks(preview);
 
     // Corner "open" affordance, mirroring Obsidian's native embed chrome.
