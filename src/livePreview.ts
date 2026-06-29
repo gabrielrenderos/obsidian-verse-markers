@@ -17,11 +17,9 @@
  *     in between. Obsidian drops its link decoration when the caret is in
  *     the range, so the digits become normal editable text.
  *
- * Widgets opt back into CM6's native mouse handling via `ignoreEvent`: a
- * click on the chip lands the caret at one of its outer edges, which is
- * "touching" — so the next decoration rebuild swaps in the editable form
- * and the user can click any digit for fine placement. No DOM listeners,
- * no event delegates: cursor placement uses CM6's own posAtCoords.
+ * Widgets handle their own clicks (`ignoreEvent`): a click anywhere on the
+ * chip places the caret just before `]` (`[N|]`), which counts as touching —
+ * so the next decoration rebuild swaps in the editable form.
  *
  * `[//]` inside ==highlight== accents `//` only; outside, full bracket marks.
  */
@@ -34,7 +32,7 @@ import {
   WidgetType,
   type ViewUpdate,
 } from "@codemirror/view";
-import { Prec, RangeSetBuilder, type StateEffect } from "@codemirror/state";
+import { Prec, RangeSetBuilder, EditorSelection, type StateEffect } from "@codemirror/state";
 import {
   execVerseMarker,
   findVerseBreakIndex,
@@ -84,7 +82,9 @@ class VerseMarkerBracketWidget extends WidgetType {
 class VerseMarkerWidget extends WidgetType {
   constructor(
     readonly label: string,
-    readonly flashClass: string
+    readonly flashClass: string,
+    readonly markerFrom: number,
+    readonly markerTo: number
   ) {
     super();
   }
@@ -93,16 +93,18 @@ class VerseMarkerWidget extends WidgetType {
     return (
       other instanceof VerseMarkerWidget &&
       other.label === this.label &&
-      other.flashClass === this.flashClass
+      other.flashClass === this.flashClass &&
+      other.markerFrom === this.markerFrom &&
+      other.markerTo === this.markerTo
     );
   }
 
-  /** Let CM6 process mouse events natively (posAtCoords placement). */
+  /** Handle clicks on the chip so the caret lands inside the brackets. */
   ignoreEvent(): boolean {
-    return false;
+    return true;
   }
 
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const wrap = activeDocument.createElement("span");
     wrap.className = ["verse-marker-widget", this.flashClass]
       .filter(Boolean)
@@ -121,6 +123,18 @@ class VerseMarkerWidget extends WidgetType {
     close.textContent = "]";
 
     wrap.append(open, label, close);
+
+    const placeCaretInside = (event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      view.focus();
+      view.dispatch({
+        selection: EditorSelection.cursor(this.markerTo - 1),
+        scrollIntoView: true,
+      });
+    };
+    wrap.addEventListener("mousedown", placeCaretInside, true);
+
     return wrap;
   }
 }
@@ -150,39 +164,17 @@ function widgetFlashClass(markerFrom: number, markerTo: number): string {
   return flashClassesForWidget(markerFrom, markerTo);
 }
 
-/** Touches `[from, to)` or sits at either edge. */
+/** Caret inside `[from, to)` — excludes the position after `]`. */
 function selectionTouchesMarker(
   view: EditorView,
   from: number,
   to: number
 ): boolean {
-  return view.state.selection.ranges.some(
-    (range) => range.from <= to && range.to >= from
-  );
-}
-
-/** Any visible `[N]` before ` [` that the current selection touches. */
-function selectionTouchesFootnoteWidgetMarker(view: EditorView): boolean {
-  const doc = view.state.doc;
-  const fullText = doc.toString();
-  const re = getVerseRegex();
-  for (const { from, to } of view.visibleRanges) {
-    let pos = from;
-    while (pos < to) {
-      const m = execVerseMarker(re, doc.sliceString(pos, to));
-      if (!m) break;
-      const matchFrom = pos + m.index;
-      const matchTo = matchFrom + m[0].length;
-      if (
-        isFollowedByFootnoteRef(fullText, matchTo) &&
-        selectionTouchesMarker(view, matchFrom, matchTo)
-      ) {
-        return true;
-      }
-      pos = matchTo;
-    }
-  }
-  return false;
+  return view.state.selection.ranges.some((range) => {
+    if (!range.empty) return range.from < to && range.to > from;
+    const pos = range.from;
+    return pos >= from && pos < to;
+  });
 }
 
 function bracketReplaceDecoration(
@@ -211,7 +203,9 @@ function pushFootnoteWidgetMarks(
     decoration: Decoration.replace({
       widget: new VerseMarkerWidget(
         label,
-        widgetFlashClass(matchFrom, matchTo)
+        widgetFlashClass(matchFrom, matchTo),
+        matchFrom,
+        matchTo
       ),
       inclusive: false,
       inclusiveStart: true,
@@ -351,25 +345,18 @@ function transactionHasFlashChange(tr: {
 
 class VerseMarkerLivePreviewPlugin {
   decorations: DecorationSet;
-  /** Previous frame: caret was on a footnote-widget `[N]`. */
-  private editingFootnoteWidget = false;
 
   constructor(view: EditorView) {
     this.decorations = buildDecorations(view).all;
-    this.editingFootnoteWidget = selectionTouchesFootnoteWidgetMarker(view);
   }
 
   update(update: ViewUpdate): void {
     const flashChanged = update.transactions.some(transactionHasFlashChange);
-    const touching = selectionTouchesFootnoteWidgetMarker(update.view);
-    const cursorEntersOrLeavesWidget =
-      update.selectionSet && (touching || this.editingFootnoteWidget);
-    this.editingFootnoteWidget = touching;
     if (
       update.docChanged ||
       update.viewportChanged ||
       flashChanged ||
-      cursorEntersOrLeavesWidget
+      update.selectionSet
     ) {
       this.decorations = buildDecorations(update.view).all;
     }

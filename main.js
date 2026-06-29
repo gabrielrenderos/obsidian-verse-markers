@@ -2487,19 +2487,21 @@ var VerseMarkerBracketWidget = class extends import_view3.WidgetType {
   }
 };
 var VerseMarkerWidget = class extends import_view3.WidgetType {
-  constructor(label, flashClass) {
+  constructor(label, flashClass, markerFrom, markerTo) {
     super();
     this.label = label;
     this.flashClass = flashClass;
+    this.markerFrom = markerFrom;
+    this.markerTo = markerTo;
   }
   eq(other) {
-    return other instanceof VerseMarkerWidget && other.label === this.label && other.flashClass === this.flashClass;
+    return other instanceof VerseMarkerWidget && other.label === this.label && other.flashClass === this.flashClass && other.markerFrom === this.markerFrom && other.markerTo === this.markerTo;
   }
-  /** Let CM6 process mouse events natively (posAtCoords placement). */
+  /** Handle clicks on the chip so the caret lands inside the brackets. */
   ignoreEvent() {
-    return false;
+    return true;
   }
-  toDOM() {
+  toDOM(view) {
     const wrap = activeDocument.createElement("span");
     wrap.className = ["verse-marker-widget", this.flashClass].filter(Boolean).join(" ");
     const open = activeDocument.createElement("span");
@@ -2512,6 +2514,16 @@ var VerseMarkerWidget = class extends import_view3.WidgetType {
     close.className = "verse-marker-bracket";
     close.textContent = "]";
     wrap.append(open, label, close);
+    const placeCaretInside = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      view.focus();
+      view.dispatch({
+        selection: import_state2.EditorSelection.cursor(this.markerTo - 1),
+        scrollIntoView: true
+      });
+    };
+    wrap.addEventListener("mousedown", placeCaretInside, true);
     return wrap;
   }
 };
@@ -2530,29 +2542,12 @@ function widgetFlashClass(markerFrom, markerTo) {
   return flashClassesForWidget(markerFrom, markerTo);
 }
 function selectionTouchesMarker(view, from, to) {
-  return view.state.selection.ranges.some(
-    (range) => range.from <= to && range.to >= from
-  );
-}
-function selectionTouchesFootnoteWidgetMarker(view) {
-  const doc = view.state.doc;
-  const fullText = doc.toString();
-  const re = getVerseRegex();
-  for (const { from, to } of view.visibleRanges) {
-    let pos = from;
-    while (pos < to) {
-      const m = execVerseMarker(re, doc.sliceString(pos, to));
-      if (!m)
-        break;
-      const matchFrom = pos + m.index;
-      const matchTo = matchFrom + m[0].length;
-      if (isFollowedByFootnoteRef(fullText, matchTo) && selectionTouchesMarker(view, matchFrom, matchTo)) {
-        return true;
-      }
-      pos = matchTo;
-    }
-  }
-  return false;
+  return view.state.selection.ranges.some((range) => {
+    if (!range.empty)
+      return range.from < to && range.to > from;
+    const pos = range.from;
+    return pos >= from && pos < to;
+  });
 }
 function bracketReplaceDecoration(bracket, flashClass) {
   return import_view3.Decoration.replace({
@@ -2570,7 +2565,9 @@ function pushFootnoteWidgetMarks(specs, matchFrom, matchTo, label) {
     decoration: import_view3.Decoration.replace({
       widget: new VerseMarkerWidget(
         label,
-        widgetFlashClass(matchFrom, matchTo)
+        widgetFlashClass(matchFrom, matchTo),
+        matchFrom,
+        matchTo
       ),
       inclusive: false,
       inclusiveStart: true,
@@ -2682,17 +2679,11 @@ function transactionHasFlashChange(tr) {
 }
 var VerseMarkerLivePreviewPlugin = class {
   constructor(view) {
-    /** Previous frame: caret was on a footnote-widget `[N]`. */
-    this.editingFootnoteWidget = false;
     this.decorations = buildDecorations(view).all;
-    this.editingFootnoteWidget = selectionTouchesFootnoteWidgetMarker(view);
   }
   update(update) {
     const flashChanged = update.transactions.some(transactionHasFlashChange);
-    const touching = selectionTouchesFootnoteWidgetMarker(update.view);
-    const cursorEntersOrLeavesWidget = update.selectionSet && (touching || this.editingFootnoteWidget);
-    this.editingFootnoteWidget = touching;
-    if (update.docChanged || update.viewportChanged || flashChanged || cursorEntersOrLeavesWidget) {
+    if (update.docChanged || update.viewportChanged || flashChanged || update.selectionSet) {
       this.decorations = buildDecorations(update.view).all;
     }
   }

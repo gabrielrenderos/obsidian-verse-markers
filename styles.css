@@ -29,6 +29,7 @@
 /* Live Preview: `[N]` before `[^id]` — same classes, replace avoids link parse. */
 .markdown-source-view.mod-cm6 .verse-marker-widget {
   display: inline;
+  cursor: text;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
   transition: background-color 220ms ease-in-out;
