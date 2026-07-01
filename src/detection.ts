@@ -820,8 +820,8 @@ function stripBlockquoteMarker(line: string): string {
 }
 
 /**
- * Drops outside-flow spans between `[///]` toggles. No-op on `[///]` before the
- * first Roman marker in `raw`.
+ * Drops outside-flow prose between `[///]` toggles while keeping verse/section
+ * markers. No-op on `[///]` before the first Roman marker in `raw`.
  */
 function stripStructuredFlowGaps(raw: string): string {
   const parts: string[] = [];
@@ -834,14 +834,25 @@ function stripStructuredFlowGaps(raw: string): string {
       if (inStructured) parts.push(raw.slice(pos));
       break;
     }
-    if (tok.index > pos && inStructured) {
-      parts.push(raw.slice(pos, tok.index));
-    }
-    if (tok.kind === "flowBreak") {
-      if (sawSection) inStructured = !inStructured;
+
+    if (inStructured) {
+      parts.push(raw.slice(pos, tok.index + tok.length));
+      if (tok.kind === "flowBreak" && sawSection) {
+        inStructured = false;
+      } else if (tok.kind === "marker" && tok.raw.kind === "roman") {
+        sawSection = true;
+      }
+    } else if (tok.kind === "flowBreak" && sawSection) {
+      inStructured = true;
     } else if (tok.kind === "marker" && tok.raw.kind === "roman") {
       sawSection = true;
+      inStructured = true;
+      parts.push(raw.slice(tok.index, tok.index + tok.length));
+    } else if (tok.kind === "marker" && tok.raw.kind === "numeric") {
+      inStructured = true;
+      parts.push(raw.slice(tok.index, tok.index + tok.length));
     }
+
     pos = tok.index + tok.length;
   }
   return parts.join("");

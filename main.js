@@ -582,14 +582,22 @@ function stripStructuredFlowGaps(raw) {
         parts.push(raw.slice(pos));
       break;
     }
-    if (tok.index > pos && inStructured) {
-      parts.push(raw.slice(pos, tok.index));
-    }
-    if (tok.kind === "flowBreak") {
-      if (sawSection)
-        inStructured = !inStructured;
+    if (inStructured) {
+      parts.push(raw.slice(pos, tok.index + tok.length));
+      if (tok.kind === "flowBreak" && sawSection) {
+        inStructured = false;
+      } else if (tok.kind === "marker" && tok.raw.kind === "roman") {
+        sawSection = true;
+      }
+    } else if (tok.kind === "flowBreak" && sawSection) {
+      inStructured = true;
     } else if (tok.kind === "marker" && tok.raw.kind === "roman") {
       sawSection = true;
+      inStructured = true;
+      parts.push(raw.slice(tok.index, tok.index + tok.length));
+    } else if (tok.kind === "marker" && tok.raw.kind === "numeric") {
+      inStructured = true;
+      parts.push(raw.slice(tok.index, tok.index + tok.length));
     }
     pos = tok.index + tok.length;
   }
