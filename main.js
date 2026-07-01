@@ -28,7 +28,10 @@ __export(main_exports, {
   default: () => VerseMarkersPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian6 = require("obsidian");
+var import_obsidian7 = require("obsidian");
+
+// src/postprocessor.ts
+var import_obsidian = require("obsidian");
 
 // src/detection.ts
 var VERSE_MARKER_REGEX = /\[\d+[a-z]*\](?=\s|$)/gm;
@@ -65,7 +68,9 @@ function execVerseMarker(re, text) {
   return null;
 }
 function hasVerseMarker(text) {
-  return execVerseMarker(getVerseRegex(), text) !== null;
+  if (execVerseMarker(getVerseRegex(), text) !== null)
+    return true;
+  return execRomanSectionMarker(getRomanSectionRegex(), text) !== null;
 }
 function parseMarkerToken(token) {
   const m = /^\[(\d+)([a-z]*)\]$/.exec(token);
@@ -76,31 +81,306 @@ function parseMarkerToken(token) {
 function partToIndex(part) {
   return part.charCodeAt(0) - "a".charCodeAt(0);
 }
-function scanMarkers(text) {
-  const re = getVerseRegex();
-  const hits = [];
+var ROMAN_SECTION_MARKER_REGEX = /\[([IVXLCDM]+)\](?=\s|$)/g;
+function getRomanSectionRegex() {
+  return new RegExp(
+    ROMAN_SECTION_MARKER_REGEX.source,
+    ROMAN_SECTION_MARKER_REGEX.flags
+  );
+}
+function parseRomanNumeral(s) {
+  var _a;
+  const values = {
+    I: 1,
+    V: 5,
+    X: 10,
+    L: 50,
+    C: 100,
+    D: 500,
+    M: 1e3
+  };
+  let total = 0;
+  let prev = 0;
+  for (let i = s.length - 1; i >= 0; i--) {
+    const v = (_a = values[s[i]]) != null ? _a : 0;
+    if (v < prev)
+      total -= v;
+    else {
+      total += v;
+      prev = v;
+    }
+  }
+  return total;
+}
+function isValidRomanSection(s) {
+  return /^[IVXLCDM]+$/.test(s) && parseRomanNumeral(s) > 0;
+}
+function execRomanSectionMarker(re, text) {
   let m;
-  while ((m = execVerseMarker(re, text)) !== null) {
-    const { number, part } = parseMarkerToken(m[0]);
-    hits.push({
-      number,
-      part,
-      index: m.index,
-      afterMarker: m.index + m[0].length
-    });
+  while ((m = re.exec(text)) !== null) {
+    if (atVerseBoundary(text, m.index) && isValidRomanSection(m[1])) {
+      return m;
+    }
+  }
+  return null;
+}
+function nextRawMarkerToken(text, from) {
+  const slice = text.slice(from);
+  const numM = execVerseMarker(getVerseRegex(), slice);
+  const numIdx = numM ? from + numM.index : -1;
+  const romM = execRomanSectionMarker(getRomanSectionRegex(), slice);
+  const romIdx = romM ? from + romM.index : -1;
+  if (numIdx === -1 && romIdx === -1)
+    return null;
+  if (numIdx === -1 || romIdx !== -1 && romIdx < numIdx) {
+    return {
+      kind: "roman",
+      index: romIdx,
+      length: romM[0].length,
+      roman: romM[1]
+    };
+  }
+  return {
+    kind: "numeric",
+    index: numIdx,
+    length: numM[0].length,
+    token: numM[0]
+  };
+}
+function scanMarkers(text) {
+  const hits = [];
+  let pos = 0;
+  let currentSection = null;
+  let sawSection = false;
+  let structuredFlowActive = true;
+  let scopedChildrenActive = false;
+  let resumableScopedChildren = false;
+  while (pos < text.length) {
+    const tok = nextProcessToken(text, pos);
+    if (!tok)
+      break;
+    if (tok.kind === "flowBreak") {
+      if (sawSection) {
+        if (structuredFlowActive) {
+          resumableScopedChildren = scopedChildrenActive;
+          structuredFlowActive = false;
+          scopedChildrenActive = false;
+        } else {
+          structuredFlowActive = true;
+          scopedChildrenActive = resumableScopedChildren;
+        }
+      }
+      pos = tok.index + tok.length;
+      continue;
+    }
+    if (tok.kind === "verseBreak") {
+      pos = tok.index + tok.length;
+      continue;
+    }
+    const raw = tok.raw;
+    if (raw.kind === "roman") {
+      sawSection = true;
+      currentSection = raw.roman;
+      structuredFlowActive = true;
+      scopedChildrenActive = true;
+      hits.push({
+        kind: "section",
+        section: raw.roman,
+        number: 0,
+        part: null,
+        index: raw.index,
+        afterMarker: raw.index + raw.length
+      });
+    } else {
+      const { number, part } = parseMarkerToken(raw.token);
+      if (!structuredFlowActive) {
+        structuredFlowActive = true;
+        scopedChildrenActive = false;
+      }
+      if (sawSection && currentSection !== null && scopedChildrenActive) {
+        hits.push({
+          kind: "child",
+          section: currentSection,
+          number,
+          part,
+          index: raw.index,
+          afterMarker: raw.index + raw.length
+        });
+      } else {
+        hits.push({
+          kind: "flat",
+          section: null,
+          number,
+          part,
+          index: raw.index,
+          afterMarker: raw.index + raw.length
+        });
+      }
+    }
+    pos = tok.index + tok.length;
   }
   return hits;
 }
+function verseRefsEqual(a, b) {
+  return a.section === b.section && a.number === b.number && a.part === b.part;
+}
+function verseRefToLabel(ref) {
+  if (ref.section !== null && ref.number === null)
+    return ref.section;
+  const base = ref.section !== null ? `${ref.section}.${ref.number}` : `${ref.number}`;
+  return ref.part ? `${base}${ref.part}` : base;
+}
+function verseRefToDisplayLabel(ref, showRomanParentInNested) {
+  if (ref.section !== null && ref.number === null)
+    return ref.section;
+  if (ref.section !== null && ref.number !== null && !showRomanParentInNested) {
+    return ref.part ? `${ref.number}${ref.part}` : `${ref.number}`;
+  }
+  return verseRefToLabel(ref);
+}
+function shouldOmitLoneRomanMarker(text, afterRoman, romanSection) {
+  var _a, _b;
+  const tok = nextProcessToken(text, afterRoman);
+  if (!tok || tok.kind !== "marker" || tok.raw.kind !== "numeric")
+    return false;
+  const between = text.slice(afterRoman, tok.index);
+  if (!/^\s*$/.test(between))
+    return false;
+  const state = verseProcessStateAt(text, afterRoman);
+  if (!state.scopedChildrenActive || state.currentSection !== romanSection) {
+    return false;
+  }
+  const probe = { ...state };
+  applyProcessToken(probe, tok);
+  return ((_a = probe.openVerseRef) == null ? void 0 : _a.section) === romanSection && ((_b = probe.openVerseRef) == null ? void 0 : _b.number) !== null;
+}
+function verseRefToAnchorId(ref) {
+  return `verse-${verseRefToLabel(ref)}`;
+}
+function flatVerseRef(number, part = null) {
+  return { section: null, number, part };
+}
+function hitToRef(hit) {
+  if (hit.kind === "section") {
+    return { section: hit.section, number: null, part: null };
+  }
+  if (hit.kind === "child") {
+    return {
+      section: hit.section,
+      number: hit.number,
+      part: hit.part
+    };
+  }
+  return { section: null, number: hit.number, part: hit.part };
+}
+function refMatchesHit(ref, hit) {
+  if (ref.number === null) {
+    return hit.kind === "section" && hit.section === ref.section;
+  }
+  if (ref.section === null) {
+    if (hit.kind !== "flat" || hit.number !== ref.number)
+      return false;
+    return ref.part === null || hit.part === ref.part;
+  }
+  if (hit.kind !== "child")
+    return false;
+  if (hit.section !== ref.section || hit.number !== ref.number)
+    return false;
+  return ref.part === null || hit.part === ref.part;
+}
+function findHitForRef(hits, ref) {
+  return hits.findIndex((h) => refMatchesHit(ref, h));
+}
+function parseVerseRefEndpoint(endpoint) {
+  const child = /^([IVXLCDM]+)\.(\d+)([a-z]*)$/.exec(endpoint);
+  if (child && isValidRomanSection(child[1])) {
+    return {
+      section: child[1],
+      number: parseInt(child[2], 10),
+      part: child[3] === "" ? null : child[3]
+    };
+  }
+  const section = /^([IVXLCDM]+)$/.exec(endpoint);
+  if (section && isValidRomanSection(section[1])) {
+    return { section: section[1], number: null, part: null };
+  }
+  const flat = /^(\d+)([a-z]*)$/.exec(endpoint);
+  if (flat) {
+    return {
+      section: null,
+      number: parseInt(flat[1], 10),
+      part: flat[2] === "" ? null : flat[2]
+    };
+  }
+  return null;
+}
+function isCitableHit(hit) {
+  return hit.kind === "flat" || hit.kind === "child";
+}
+function lastHitIndexInSection(hits, section) {
+  let last = -1;
+  for (let i = 0; i < hits.length; i++) {
+    if (hits[i].kind === "section" && hits[i].section === section) {
+      last = i;
+    } else if (hits[i].kind === "child" && hits[i].section === section) {
+      last = i;
+    }
+  }
+  return last;
+}
+function rangeStartHitIndex(hits, ref) {
+  if (ref.number === null) {
+    return hits.findIndex(
+      (h) => h.kind === "section" && h.section === ref.section
+    );
+  }
+  return findHitForRef(hits, ref);
+}
+function rangeEndHitIndex(hits, ref) {
+  if (ref.number === null) {
+    return lastHitIndexInSection(hits, ref.section);
+  }
+  return findHitForRef(hits, ref);
+}
+function contentEndBeforeNextHit(text, hits, hitIndex) {
+  const nextIdx = hitIndex + 1;
+  if (nextIdx < hits.length) {
+    return lineLeadStart(text, hits[nextIdx].index);
+  }
+  return text.length;
+}
 var HEADING_LINE_REGEX = /^\s*#{1,6}\s+\S.*$/;
 var VERSE_BREAK_TOKEN = "[//]";
-function findVerseBreakIndex(text, from = 0) {
+var SECTION_FLOW_BREAK_TOKEN = "[///]";
+function isEscapedToken(text, index) {
+  return index > 0 && text[index - 1] === "\\";
+}
+function findVerseBreakIndex(text, from = 0, limit = text.length) {
   let pos = from;
-  while (pos < text.length) {
+  while (pos < limit) {
     const idx = text.indexOf(VERSE_BREAK_TOKEN, pos);
-    if (idx === -1)
+    if (idx === -1 || idx >= limit)
       return -1;
-    if (idx > 0 && text[idx - 1] === "\\") {
+    if (isEscapedToken(text, idx)) {
       pos = idx + VERSE_BREAK_TOKEN.length;
+      continue;
+    }
+    if (text.slice(idx, idx + SECTION_FLOW_BREAK_TOKEN.length) === SECTION_FLOW_BREAK_TOKEN) {
+      pos = idx + 1;
+      continue;
+    }
+    return idx;
+  }
+  return -1;
+}
+function findSectionFlowBreakIndex(text, from = 0, limit = text.length) {
+  let pos = from;
+  while (pos < limit) {
+    const idx = text.indexOf(SECTION_FLOW_BREAK_TOKEN, pos);
+    if (idx === -1 || idx >= limit)
+      return -1;
+    if (isEscapedToken(text, idx)) {
+      pos = idx + SECTION_FLOW_BREAK_TOKEN.length;
       continue;
     }
     return idx;
@@ -109,6 +389,155 @@ function findVerseBreakIndex(text, from = 0) {
 }
 function isVerseBreakLine(line) {
   return /^\s*(?:>\s?)*\[\/\/\]\s*$/.test(line);
+}
+function isSectionFlowBreakLine(line) {
+  return /^\s*(?:>\s?)*\[\/\/\/\]\s*$/.test(line);
+}
+function nextProcessToken(text, from, limit = text.length) {
+  const flowRel = findSectionFlowBreakIndex(text, from, limit);
+  const flowIdx = flowRel === -1 ? -1 : flowRel;
+  const brIdx = findVerseBreakIndex(text, from, limit);
+  const raw = nextRawMarkerToken(text, from);
+  const markerIdx = raw && raw.index < limit ? raw.index : -1;
+  let bestIdx = -1;
+  let best = null;
+  if (flowIdx !== -1 && (bestIdx === -1 || flowIdx < bestIdx)) {
+    bestIdx = flowIdx;
+    best = {
+      kind: "flowBreak",
+      index: flowIdx,
+      length: SECTION_FLOW_BREAK_TOKEN.length
+    };
+  }
+  if (brIdx !== -1 && (bestIdx === -1 || brIdx < bestIdx)) {
+    bestIdx = brIdx;
+    best = {
+      kind: "verseBreak",
+      index: brIdx,
+      length: VERSE_BREAK_TOKEN.length
+    };
+  }
+  if (markerIdx !== -1 && (bestIdx === -1 || markerIdx < bestIdx) && raw) {
+    best = {
+      kind: "marker",
+      index: markerIdx,
+      length: raw.length,
+      raw
+    };
+  }
+  return best;
+}
+function defaultVerseProcessState() {
+  return {
+    inVerseSpan: false,
+    inVerseMode: true,
+    inSectionSpan: false,
+    structuredFlowActive: true,
+    scopedChildrenActive: false,
+    currentSection: null,
+    sawSection: false,
+    resumableRef: null,
+    openVerseRef: null
+  };
+}
+function currentResumableRef(state) {
+  if (state.openVerseRef)
+    return { ...state.openVerseRef };
+  if (state.inSectionSpan && state.currentSection) {
+    return { section: state.currentSection, number: null, part: null };
+  }
+  return null;
+}
+function restoreResumableRef(state) {
+  const ref = state.resumableRef;
+  if (!ref) {
+    state.inVerseSpan = false;
+    state.inSectionSpan = false;
+    state.inVerseMode = true;
+    state.openVerseRef = null;
+    state.scopedChildrenActive = false;
+    return;
+  }
+  if (ref.number === null && ref.section) {
+    state.currentSection = ref.section;
+    state.sawSection = true;
+    state.inSectionSpan = true;
+    state.inVerseSpan = false;
+    state.scopedChildrenActive = true;
+    state.openVerseRef = null;
+  } else if (ref.section) {
+    state.currentSection = ref.section;
+    state.sawSection = true;
+    state.inSectionSpan = true;
+    state.inVerseSpan = true;
+    state.scopedChildrenActive = true;
+    state.openVerseRef = { ...ref };
+  } else {
+    state.inSectionSpan = false;
+    state.inVerseSpan = true;
+    state.scopedChildrenActive = false;
+    state.openVerseRef = { ...ref };
+  }
+  state.inVerseMode = true;
+}
+function applyProcessToken(state, tok) {
+  if (tok.kind === "flowBreak") {
+    if (!state.sawSection)
+      return;
+    if (state.structuredFlowActive) {
+      state.resumableRef = currentResumableRef(state);
+      state.structuredFlowActive = false;
+      state.scopedChildrenActive = false;
+      state.inVerseSpan = false;
+      state.inSectionSpan = false;
+      state.inVerseMode = true;
+      state.openVerseRef = null;
+    } else {
+      state.structuredFlowActive = true;
+      restoreResumableRef(state);
+      state.resumableRef = null;
+    }
+    return;
+  }
+  if (tok.kind === "verseBreak") {
+    if (state.structuredFlowActive && (state.inVerseSpan || state.inSectionSpan)) {
+      state.inVerseMode = !state.inVerseMode;
+    }
+    return;
+  }
+  if (tok.kind !== "marker")
+    return;
+  const raw = tok.raw;
+  if (raw.kind === "roman") {
+    state.sawSection = true;
+    state.currentSection = raw.roman;
+    state.inSectionSpan = true;
+    state.inVerseSpan = false;
+    state.inVerseMode = true;
+    state.structuredFlowActive = true;
+    state.scopedChildrenActive = true;
+    state.openVerseRef = null;
+    state.resumableRef = null;
+    return;
+  }
+  const { number, part } = parseMarkerToken(raw.token);
+  if (!state.structuredFlowActive) {
+    state.structuredFlowActive = true;
+    state.scopedChildrenActive = false;
+  }
+  state.inVerseSpan = true;
+  state.inVerseMode = true;
+  if (state.sawSection && state.currentSection && state.scopedChildrenActive) {
+    state.inSectionSpan = true;
+    state.openVerseRef = {
+      section: state.currentSection,
+      number,
+      part
+    };
+  } else {
+    state.inSectionSpan = false;
+    state.openVerseRef = flatVerseRef(number, part);
+  }
 }
 function charOffsetForLine(text, lineIndex) {
   if (lineIndex <= 0)
@@ -126,31 +555,45 @@ function isFollowedByFootnoteRef(text, markerEnd) {
   return /^ \[/.test(text.slice(markerEnd));
 }
 function verseProcessStateAt(text, endOffset) {
-  const state = { inVerseSpan: false, inVerseMode: true };
+  const state = defaultVerseProcessState();
   let pos = 0;
   const limit = Math.min(endOffset, text.length);
   while (pos < limit) {
-    const slice = text.slice(pos, limit);
-    const brRel = findVerseBreakIndex(slice);
-    const brIdx = brRel === -1 ? -1 : pos + brRel;
-    const m = execVerseMarker(getVerseRegex(), slice);
-    const markerIdx = m ? pos + m.index : -1;
-    if (brIdx === -1 && markerIdx === -1)
+    const tok = nextProcessToken(text, pos, limit);
+    if (!tok)
       break;
-    if (markerIdx === -1 || brIdx !== -1 && brIdx < markerIdx) {
-      if (state.inVerseSpan)
-        state.inVerseMode = !state.inVerseMode;
-      pos = brIdx + VERSE_BREAK_TOKEN.length;
-    } else {
-      state.inVerseSpan = true;
-      state.inVerseMode = true;
-      pos = markerIdx + m[0].length;
-    }
+    applyProcessToken(state, tok);
+    pos = tok.index + tok.length;
   }
   return state;
 }
 function stripBlockquoteMarker(line) {
   return line.replace(/^\s*>\s?/, "");
+}
+function stripStructuredFlowGaps(raw) {
+  const parts = [];
+  let inStructured = true;
+  let sawSection = false;
+  let pos = 0;
+  while (pos < raw.length) {
+    const tok = nextProcessToken(raw, pos);
+    if (!tok) {
+      if (inStructured)
+        parts.push(raw.slice(pos));
+      break;
+    }
+    if (tok.index > pos && inStructured) {
+      parts.push(raw.slice(pos, tok.index));
+    }
+    if (tok.kind === "flowBreak") {
+      if (sawSection)
+        inStructured = !inStructured;
+    } else if (tok.kind === "marker" && tok.raw.kind === "roman") {
+      sawSection = true;
+    }
+    pos = tok.index + tok.length;
+  }
+  return parts.join("");
 }
 function stripEditorialBreaks(raw) {
   const parts = [];
@@ -169,6 +612,9 @@ function stripEditorialBreaks(raw) {
     pos = br + VERSE_BREAK_TOKEN.length;
   }
   return parts.join("");
+}
+function stripCitationGaps(raw) {
+  return stripEditorialBreaks(stripStructuredFlowGaps(raw));
 }
 function paragraphStartAt(text, offset) {
   let lineStart = text.lastIndexOf("\n", offset - 1) + 1;
@@ -267,25 +713,18 @@ function versePartSegments(rawContent) {
 function splitVerseParts(rawContent) {
   return versePartSegments(rawContent).flat();
 }
-function findVerseSpan(text, verseNumber) {
-  const re = getVerseRegex();
-  let spanStart = -1;
-  let spanEnd = text.length;
-  let match;
-  while ((match = execVerseMarker(re, text)) !== null) {
-    const num = parseMarkerToken(match[0]).number;
-    const afterMarker = match.index + match[0].length;
-    if (spanStart === -1 && num === verseNumber) {
-      if (text[afterMarker] !== " ")
-        return null;
-      spanStart = afterMarker + 1;
-    } else if (spanStart !== -1) {
-      spanEnd = match.index;
-      break;
-    }
-  }
-  if (spanStart === -1)
+function findVerseSpanByRef(text, ref) {
+  const hits = scanMarkers(text);
+  const idx = findHitForRef(hits, ref);
+  if (idx === -1)
     return null;
+  const hit = hits[idx];
+  if (!isCitableHit(hit))
+    return null;
+  if (text[hit.afterMarker] !== " ")
+    return null;
+  const spanStart = hit.afterMarker + 1;
+  const spanEnd = idx + 1 < hits.length ? hits[idx + 1].index : text.length;
   return { start: spanStart, end: spanEnd };
 }
 function verseModeSourceIntervals(text, from, to) {
@@ -346,12 +785,6 @@ function trimTrailingWhitespaceRange(text, from, to) {
     return null;
   return { from, to: end };
 }
-function verseNumberAtMarker(text, offset) {
-  const m = execVerseMarker(getVerseRegex(), text.slice(offset));
-  if (!m || m.index !== 0)
-    return null;
-  return parseMarkerToken(m[0]).number;
-}
 function isEmptyTail(text, afterLine, before) {
   let tail = text.slice(afterLine, before);
   const foot = footnoteDefinitionsBlockStart(text, afterLine);
@@ -375,49 +808,35 @@ function trailingHeadingStartInSpan(text, searchFrom, searchBefore) {
   }
   return null;
 }
-function flashSpanEndForVerse(text, span, inRange) {
-  let end = span.end;
-  const nextInSelection = end < text.length && (() => {
-    const nextNum = verseNumberAtMarker(text, end);
-    return nextNum !== null && inRange.has(nextNum);
-  })();
-  if (!nextInSelection) {
-    const heading = trailingHeadingStartInSpan(text, span.start, end);
-    if (heading !== null)
-      end = heading;
-  }
-  const footStart = footnoteDefinitionsBlockStart(text, span.start);
-  if (footStart !== null && footStart < end)
-    end = footStart;
-  return end;
-}
-function markerTokenRangeForVerse(text, verseNumber) {
-  const re = getVerseRegex();
-  let m;
-  while ((m = execVerseMarker(re, text)) !== null) {
-    if (parseMarkerToken(m[0]).number === verseNumber) {
-      return { from: m.index, to: m.index + m[0].length };
-    }
-  }
-  return null;
+function markerTokenRangeForRef(text, ref) {
+  const hits = scanMarkers(text);
+  const idx = findHitForRef(hits, ref);
+  if (idx === -1 || !isCitableHit(hits[idx]))
+    return null;
+  return { from: hits[idx].index, to: hits[idx].afterMarker };
 }
 function getVerseFlashRuns(text, segments) {
   var _a;
-  const inRange = /* @__PURE__ */ new Set();
-  for (const seg of segments) {
-    for (let n = seg.start; n <= seg.end; n++)
-      inRange.add(n);
-  }
+  const hits = scanMarkers(text);
   const runs = [];
   for (const seg of segments) {
+    const startIdx = rangeStartHitIndex(hits, seg.start);
+    const endIdx = rangeEndHitIndex(hits, seg.end);
+    if (startIdx === -1 || endIdx === -1 || startIdx > endIdx)
+      continue;
     const parts = [];
-    for (let n = seg.start; n <= seg.end; n++) {
-      const span = findVerseSpan(text, n);
+    for (let i = startIdx; i <= endIdx; i++) {
+      if (!isCitableHit(hits[i]))
+        continue;
+      const ref = hitToRef(hits[i]);
+      if (!ref || ref.number === null)
+        continue;
+      const span = findVerseSpanByRef(text, ref);
       if (!span)
         continue;
-      const marker = markerTokenRangeForVerse(text, n);
+      const marker = markerTokenRangeForRef(text, ref);
       const flashFrom = (_a = marker == null ? void 0 : marker.from) != null ? _a : span.start;
-      const spanEnd = flashSpanEndForVerse(text, span, inRange);
+      const spanEnd = flashSpanEndForVerseRef(text, span, hits, i, seg);
       parts.push(...verseModeSourceIntervals(text, flashFrom, spanEnd));
     }
     const ranges = mergeAdjacentSourceRanges(parts);
@@ -436,19 +855,27 @@ function getVerseFlashRuns(text, segments) {
   }
   return runs;
 }
-function getVerseParts(text, verseNumber) {
-  const span = findVerseSpan(text, verseNumber);
-  if (!span)
-    return null;
-  return splitVerseParts(
-    stripEditorialBreaks(text.slice(span.start, span.end))
-  );
+function flashSpanEndForVerseRef(text, span, hits, hitIndex, seg) {
+  const endIdx = rangeEndHitIndex(hits, seg.end);
+  const nextInSelection = hitIndex + 1 <= endIdx && isCitableHit(hits[hitIndex + 1]) && hitIndex + 1 <= endIdx;
+  let end = span.end;
+  if (!nextInSelection) {
+    const heading = trailingHeadingStartInSpan(text, span.start, end);
+    if (heading !== null)
+      end = heading;
+  }
+  const footStart = footnoteDefinitionsBlockStart(text, span.start);
+  if (footStart !== null && footStart < end)
+    end = footStart;
+  return end;
 }
-function getVerseFragments(text, verseNumber) {
+function getVerseFragmentsByRef(text, ref) {
   const hits = scanMarkers(text);
   const fragments = [];
   for (let i = 0; i < hits.length; i++) {
-    if (hits[i].number !== verseNumber)
+    if (!refMatchesHit(ref, hits[i]))
+      continue;
+    if (!isCitableHit(hits[i]))
       continue;
     if (text[hits[i].afterMarker] !== " ")
       continue;
@@ -460,13 +887,29 @@ function getVerseFragments(text, verseNumber) {
       contentStart,
       hardEnd
     );
-    const content = splitVerseParts(stripEditorialBreaks(raw)).filter((p) => p.length > 0).join(" ");
+    const content = splitVerseParts(stripCitationGaps(raw)).filter((p) => p.length > 0).join(" ");
     fragments.push({ part: hits[i].part, content });
   }
   return fragments;
 }
-function getVerseContent(text, verseNumber, part = null) {
-  const fragments = getVerseFragments(text, verseNumber);
+function getVerseContentByRef(text, ref) {
+  if (ref.number === null) {
+    const hits = scanMarkers(text);
+    const secIdx = hits.findIndex(
+      (h) => h.kind === "section" && h.section === ref.section
+    );
+    if (secIdx === -1)
+      return null;
+    const nextIdx = secIdx + 1;
+    const end = nextIdx < hits.length ? hits[nextIdx].index : text.length;
+    const raw = stripCitationGaps(
+      text.slice(hits[secIdx].afterMarker + 1, end)
+    );
+    return raw.trim().length > 0 ? raw.trim() : null;
+  }
+  const part = ref.part;
+  const baseRef = { ...ref, part: null };
+  const fragments = getVerseFragmentsByRef(text, baseRef);
   if (fragments.length === 0)
     return null;
   if (part !== null) {
@@ -474,11 +917,11 @@ function getVerseContent(text, verseNumber, part = null) {
     if (explicit)
       return explicit.content;
     if (fragments.length === 1 && fragments[0].part === null) {
-      const span = findVerseSpan(text, verseNumber);
+      const span = findVerseSpanByRef(text, baseRef);
       if (!span)
         return null;
       const parts = splitVerseParts(
-        stripEditorialBreaks(text.slice(span.start, span.end))
+        stripCitationGaps(text.slice(span.start, span.end))
       );
       const idx = partToIndex(part);
       if (idx < 0 || idx >= parts.length)
@@ -489,40 +932,48 @@ function getVerseContent(text, verseNumber, part = null) {
   }
   return fragments.map((f) => f.content).filter((c) => c.length > 0).join(" ");
 }
-function verseBlockquotePrefix(text, verseNumber) {
-  const re = getVerseRegex();
-  let match;
-  while ((match = execVerseMarker(re, text)) !== null) {
-    if (parseMarkerToken(match[0]).number !== verseNumber)
-      continue;
-    const lineStart = text.lastIndexOf("\n", match.index - 1) + 1;
-    const prefix = /^(\s*(?:>\s?)+)/.exec(text.slice(lineStart, match.index));
-    return prefix ? prefix[1] : "";
-  }
-  return "";
-}
-function getVerseRangeRawText(text, start, end) {
+function verseBlockquotePrefixByRef(text, ref) {
   const hits = scanMarkers(text);
-  let firstIdx = -1;
-  let lastIdx = -1;
-  for (let i = 0; i < hits.length; i++) {
-    if (hits[i].number >= start && hits[i].number <= end) {
-      if (firstIdx === -1)
-        firstIdx = i;
-      lastIdx = i;
-    }
-  }
-  if (firstIdx === -1)
+  const idx = findHitForRef(hits, ref);
+  if (idx === -1 || !isCitableHit(hits[idx]))
+    return "";
+  const markerIndex = hits[idx].index;
+  const lineStart = text.lastIndexOf("\n", markerIndex - 1) + 1;
+  const prefix = /^(\s*(?:>\s?)+)/.exec(text.slice(lineStart, markerIndex));
+  return prefix ? prefix[1] : "";
+}
+function getVerseRangeRawTextByRef(text, startRef, endRef) {
+  const bounds = verseRangeSourceBounds(text, startRef, endRef);
+  if (!bounds)
     return null;
-  const startPos = lineLeadStart(text, hits[firstIdx].index);
-  const contentEnd = lastIdx + 1 < hits.length ? lineLeadStart(text, hits[lastIdx + 1].index) : text.length;
-  const sliceEnd = contentEnd;
-  let raw = text.slice(startPos, sliceEnd);
+  let raw = text.slice(bounds.startPos, bounds.contentEnd);
   const trimmedLen = raw.trimEnd().length;
   raw = raw.slice(0, trimmedLen);
-  raw = balanceHighlights(raw, text, startPos, startPos + trimmedLen);
-  raw = stripEditorialBreaks(raw);
+  raw = balanceHighlights(
+    raw,
+    text,
+    bounds.startPos,
+    bounds.startPos + trimmedLen
+  );
+  raw = stripCitationGaps(raw);
   return stripTrailingHeadingsBeforeNextVerse(raw);
+}
+function getSourceStartForRef(text, ref) {
+  const hits = scanMarkers(text);
+  const idx = rangeStartHitIndex(hits, ref);
+  if (idx === -1)
+    return null;
+  return lineLeadStart(text, hits[idx].index);
+}
+function verseRangeSourceBounds(text, startRef, endRef) {
+  const hits = scanMarkers(text);
+  const startIdx = rangeStartHitIndex(hits, startRef);
+  const endIdx = rangeEndHitIndex(hits, endRef);
+  if (startIdx === -1 || endIdx === -1 || startIdx > endIdx)
+    return null;
+  const startPos = lineLeadStart(text, hits[startIdx].index);
+  const contentEnd = contentEndBeforeNextHit(text, hits, endIdx);
+  return { startPos, contentEnd };
 }
 function lineLeadStart(text, markerIndex) {
   const lineStart = text.lastIndexOf("\n", markerIndex - 1) + 1;
@@ -627,26 +1078,23 @@ function finalizePreviewMarkdown(slice, fullText) {
     fullText
   );
 }
-function findVerseLine(text, verseNumber) {
-  const re = getVerseRegex();
-  let match;
-  while ((match = execVerseMarker(re, text)) !== null) {
-    const num = parseMarkerToken(match[0]).number;
-    if (num === verseNumber) {
-      let line = 0;
-      for (let i = 0; i < match.index; i++) {
-        if (text.charCodeAt(i) === 10)
-          line++;
-      }
-      return line;
-    }
+function findVerseLineByRef(text, ref) {
+  const hits = scanMarkers(text);
+  const idx = rangeStartHitIndex(hits, ref);
+  if (idx === -1)
+    return null;
+  const markerIndex = hits[idx].index;
+  let line = 0;
+  for (let i = 0; i < markerIndex; i++) {
+    if (text.charCodeAt(i) === 10)
+      line++;
   }
-  return null;
+  return line;
 }
 function continuationPartAnchor(text, blockStartLine) {
   const lines = text.split("\n");
   let headingCount = 0;
-  let verseNumber = null;
+  let verseRef = null;
   for (let i = blockStartLine - 1; i >= 0; i--) {
     const stripped = stripBlockquoteMarker(lines[i]);
     if (findVerseBreakIndex(lines[i]) !== -1)
@@ -655,35 +1103,44 @@ function continuationPartAnchor(text, blockStartLine) {
       headingCount++;
       continue;
     }
-    const marker = execVerseMarker(getVerseRegex(), lines[i]);
-    if (marker) {
-      verseNumber = parseMarkerToken(marker[0]).number;
+    const lineStart = charOffsetForLine(text, i);
+    const lineEnd = lineStart + lines[i].length;
+    const hit = scanMarkers(text).find(
+      (h) => isCitableHit(h) && h.index >= lineStart && h.index < lineEnd
+    );
+    if (hit) {
+      verseRef = hitToRef(hit);
       break;
     }
   }
-  if (verseNumber === null || headingCount === 0)
+  if (verseRef === null || verseRef.number === null || headingCount === 0) {
     return null;
+  }
   let index = headingCount;
-  const span = findVerseSpan(text, verseNumber);
+  const span = findVerseSpanByRef(text, verseRef);
   if (span) {
     const segments = versePartSegments(text.slice(span.start, span.end));
     for (let s = 0; s < headingCount && s < segments.length; s++) {
       index += segments[s].length - 1;
     }
   }
-  return `verse-${verseNumber}${String.fromCharCode(97 + index)}`;
+  const letter = String.fromCharCode(97 + index);
+  return verseRefToAnchorId({ ...verseRef, part: letter });
 }
-function partHasAnchor(text, verseNumber, part) {
-  if (part === null)
+function partHasAnchorByRef(text, ref) {
+  if (ref.part === null)
     return true;
-  if (scanMarkers(text).some((h) => h.number === verseNumber && h.part === part)) {
+  const base = { ...ref, part: null };
+  if (scanMarkers(text).some(
+    (h) => refMatchesHit({ ...base, part: ref.part }, h)
+  )) {
     return true;
   }
-  const span = findVerseSpan(text, verseNumber);
-  if (!span)
+  const span = findVerseSpanByRef(text, base);
+  if (!span || ref.number === null)
     return false;
   const segments = versePartSegments(text.slice(span.start, span.end));
-  const target = partToIndex(part);
+  const target = partToIndex(ref.part);
   let segmentStart = 0;
   for (const segment of segments) {
     if (segmentStart === target)
@@ -692,11 +1149,27 @@ function partHasAnchor(text, verseNumber, part) {
   }
   return false;
 }
-function firstFragmentPart(text, verseNumber) {
-  const first = scanMarkers(text).find((h) => h.number === verseNumber);
+function firstFragmentPartByRef(text, ref) {
+  const base = { ...ref, part: null };
+  const first = scanMarkers(text).find((h) => refMatchesHit(base, h));
   return first ? first.part : null;
 }
-var SEGMENT_SOURCE = String.raw`\d+[a-z]*(?::\d+[a-z]*)?`;
+var ENDPOINT_SOURCE = String.raw`(?:[IVXLCDM]+\.\d+[a-z]*|[IVXLCDM]+|\d+[a-z]*)`;
+var SEGMENT_SOURCE = `${ENDPOINT_SOURCE}(?::${ENDPOINT_SOURCE})?`;
+function parseSegmentPiece(piece) {
+  const colon = piece.indexOf(":");
+  if (colon === -1) {
+    const ref = parseVerseRefEndpoint(piece);
+    if (!ref)
+      return null;
+    return { start: ref, end: ref };
+  }
+  const start = parseVerseRefEndpoint(piece.slice(0, colon));
+  const end = parseVerseRefEndpoint(piece.slice(colon + 1));
+  if (!start || !end)
+    return null;
+  return { start, end };
+}
 function parseVerseSegments(fragment, allowShorthand = false) {
   let core;
   if (fragment.startsWith("verse-")) {
@@ -708,24 +1181,12 @@ function parseVerseSegments(fragment, allowShorthand = false) {
   }
   if (core.length === 0)
     return null;
-  const segRe = new RegExp(`^(\\d+)([a-z]*)(?::(\\d+)([a-z]*))?$`);
   const segments = [];
   for (const piece of core.split("/")) {
-    const m = segRe.exec(piece);
-    if (!m)
+    const seg = parseSegmentPiece(piece);
+    if (!seg)
       return null;
-    const start = parseInt(m[1], 10);
-    const startPart = m[2] === "" ? null : m[2];
-    if (m[3] !== void 0) {
-      segments.push({
-        start,
-        startPart,
-        end: parseInt(m[3], 10),
-        endPart: m[4] === "" ? null : m[4]
-      });
-    } else {
-      segments.push({ start, startPart, end: start, endPart: startPart });
-    }
+    segments.push(seg);
   }
   return segments;
 }
@@ -735,8 +1196,120 @@ var VERSE_FRAGMENT_TEST_STRICT = new RegExp(
 var VERSE_FRAGMENT_TEST_LOOSE = new RegExp(
   `^(?:verse-)?${SEGMENT_SOURCE}(?:/${SEGMENT_SOURCE})*$`
 );
+var VERSE_RANGE_FRAGMENT_TEST_STRICT = new RegExp(
+  `^verse-${ENDPOINT_SOURCE}:${ENDPOINT_SOURCE}$`
+);
+var VERSE_RANGE_FRAGMENT_TEST_LOOSE = new RegExp(
+  `^(?:verse-)?${ENDPOINT_SOURCE}:${ENDPOINT_SOURCE}$`
+);
+function getVersePartsByRef(text, ref) {
+  if (ref.number === null)
+    return null;
+  const span = findVerseSpanByRef(text, ref);
+  if (!span)
+    return null;
+  return splitVerseParts(
+    stripCitationGaps(text.slice(span.start, span.end))
+  );
+}
+function enumerateCitableRefsInSegment(text, seg) {
+  const hits = scanMarkers(text);
+  const startIdx = rangeStartHitIndex(hits, seg.start);
+  const endIdx = rangeEndHitIndex(hits, seg.end);
+  if (startIdx === -1 || endIdx === -1 || startIdx > endIdx)
+    return [];
+  const refs = [];
+  for (let i = startIdx; i <= endIdx; i++) {
+    if (!isCitableHit(hits[i]))
+      continue;
+    const ref = hitToRef(hits[i]);
+    if (ref && ref.number !== null)
+      refs.push(ref);
+  }
+  return refs;
+}
+function segmentIsDegenerateSingle(seg) {
+  return verseRefsEqual(seg.start, seg.end);
+}
+function anchorRefIsInSegment(text, ref, seg) {
+  const hits = scanMarkers(text);
+  const startIdx = rangeStartHitIndex(hits, seg.start);
+  const endIdx = rangeEndHitIndex(hits, seg.end);
+  const hitIdx = findHitForRef(hits, ref);
+  if (startIdx === -1 || endIdx === -1 || hitIdx === -1)
+    return false;
+  if (hitIdx < startIdx || hitIdx > endIdx)
+    return false;
+  if (verseRefsEqual(ref, seg.start) && seg.start.part !== null) {
+    if (ref.part === null)
+      return false;
+    if (ref.part.charCodeAt(0) < seg.start.part.charCodeAt(0))
+      return false;
+  }
+  if (verseRefsEqual(ref, seg.end) && seg.end.part !== null) {
+    if (ref.part === null)
+      return false;
+    if (ref.part.charCodeAt(0) > seg.end.part.charCodeAt(0))
+      return false;
+  }
+  return true;
+}
+function nearestVerseRefAtOffset(text, cursorOffset) {
+  const hits = scanMarkers(text);
+  let best = null;
+  let bestDist = Infinity;
+  for (const h of hits) {
+    const ref = hitToRef(h);
+    if (!ref)
+      continue;
+    const dist = Math.min(
+      Math.abs(cursorOffset - h.index),
+      Math.abs(cursorOffset - h.afterMarker)
+    );
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = ref;
+    }
+  }
+  return best;
+}
+function verseRefsInSelection(text, selFrom, selTo) {
+  const hits = scanMarkers(text);
+  const refs = [];
+  for (const h of hits) {
+    if (h.index < selFrom || h.index >= selTo)
+      continue;
+    const ref = hitToRef(h);
+    if (ref && ref.number !== null)
+      refs.push(ref);
+  }
+  return refs;
+}
 
 // src/postprocessor.ts
+var getRomanDisplaySettings = () => ({
+  showRomanParentInNestedVerses: true
+});
+function configureVerseMarkerDisplay(getter) {
+  getRomanDisplaySettings = getter;
+}
+function getShowRomanParentInNestedVerses() {
+  return getRomanDisplaySettings().showRomanParentInNestedVerses;
+}
+function refreshReadingViewVerseMarkers(app) {
+  app.workspace.iterateAllLeaves((leaf) => {
+    var _a;
+    if (!(leaf.view instanceof import_obsidian.MarkdownView))
+      return;
+    const preview = leaf.view.previewMode;
+    if (!((_a = preview == null ? void 0 : preview.containerEl) == null ? void 0 : _a.isConnected))
+      return;
+    const scroll = preview.getScroll();
+    const data = preview.get();
+    preview.set(data, true);
+    preview.applyScroll(scroll);
+  });
+}
 var SKIP_TAGS = /* @__PURE__ */ new Set([
   "A",
   "CODE",
@@ -770,10 +1343,13 @@ function isInsideSkipped(node, skipEmbeds = true) {
   }
   return false;
 }
+function isEditorialText(state) {
+  return state.structuredFlowActive && (state.inVerseSpan || state.inSectionSpan) && !state.inVerseMode;
+}
 function appendVerseText(fragment, text, state) {
   if (text.length === 0)
     return;
-  if (state.inVerseSpan && !state.inVerseMode) {
+  if (isEditorialText(state)) {
     const span = activeDocument.createElement("span");
     span.className = "verse-editorial";
     span.appendChild(activeDocument.createTextNode(text));
@@ -782,36 +1358,53 @@ function appendVerseText(fragment, text, state) {
   }
   fragment.appendChild(activeDocument.createTextNode(text));
 }
-function appendVerseMarker(fragment, token) {
+function appendVerseMarker(fragment, state, token, renderCtx, markerIndex) {
+  var _a;
+  if (token.startsWith("[") && /^[IVXLCDM]+$/.test(token.slice(1, -1))) {
+    const section = token.slice(1, -1);
+    if (renderCtx.showRomanParentInNested && renderCtx.sourceText !== void 0 && markerIndex !== void 0) {
+      const afterRoman = ((_a = renderCtx.sourceOffset) != null ? _a : 0) + markerIndex + token.length;
+      if (shouldOmitLoneRomanMarker(
+        renderCtx.sourceText,
+        afterRoman,
+        section
+      )) {
+        return;
+      }
+    }
+    const ref2 = { section, number: null, part: null };
+    const markerEl2 = activeDocument.createElement("span");
+    markerEl2.className = "verse-marker";
+    markerEl2.id = verseRefToAnchorId(ref2);
+    markerEl2.textContent = section;
+    fragment.appendChild(markerEl2);
+    return;
+  }
   const { number, part } = parseMarkerToken(token);
-  const label = `${number}${part != null ? part : ""}`;
+  let ref = flatVerseRef(number, part);
+  if (state.sawSection && state.currentSection !== null && state.structuredFlowActive && state.scopedChildrenActive) {
+    ref = { section: state.currentSection, number, part };
+  }
   const markerEl = activeDocument.createElement("span");
   markerEl.className = "verse-marker";
-  markerEl.id = `verse-${label}`;
-  markerEl.textContent = label;
+  markerEl.id = verseRefToAnchorId(ref);
+  markerEl.textContent = verseRefToDisplayLabel(
+    ref,
+    renderCtx.showRomanParentInNested
+  );
   fragment.appendChild(markerEl);
 }
 function nextInlineToken(text, from) {
-  const slice = text.slice(from);
-  const brRel = findVerseBreakIndex(slice);
-  const brIdx = brRel === -1 ? -1 : from + brRel;
-  const m = execVerseMarker(getVerseRegex(), slice);
-  const markerIdx = m ? from + m.index : -1;
-  if (brIdx === -1 && markerIdx === -1)
-    return null;
-  if (markerIdx === -1 || brIdx !== -1 && brIdx < markerIdx) {
-    return { index: brIdx, length: VERSE_BREAK_TOKEN.length, kind: "break" };
-  }
-  return { index: markerIdx, length: m[0].length, kind: "marker", token: m[0] };
+  return nextProcessToken(text, from);
 }
-function processTextNode(textNode, state) {
+function processTextNode(textNode, state, renderCtx) {
   var _a, _b;
   if ((_a = textNode.parentElement) == null ? void 0 : _a.closest(".verse-editorial, .verse-marker")) {
     return false;
   }
   const text = (_b = textNode.nodeValue) != null ? _b : "";
   const hasToken = nextInlineToken(text, 0) !== null;
-  if (!hasToken && !(state.inVerseSpan && !state.inVerseMode))
+  if (!hasToken && !isEditorialText(state))
     return false;
   const parent = textNode.parentNode;
   if (!parent)
@@ -834,12 +1427,10 @@ function processTextNode(textNode, state) {
       appendVerseText(fragment, text.slice(lastIndex, hit.index), state);
     }
     if (hit.kind === "marker") {
-      appendVerseMarker(fragment, hit.token);
-      state.inVerseSpan = true;
-      state.inVerseMode = true;
-    } else if (state.inVerseSpan) {
-      state.inVerseMode = !state.inVerseMode;
+      const token = hit.raw.kind === "roman" ? `[${hit.raw.roman}]` : hit.raw.token;
+      appendVerseMarker(fragment, state, token, renderCtx, hit.index);
     }
+    applyProcessToken(state, hit);
     lastIndex = hit.index + hit.length;
     pos = lastIndex;
   }
@@ -850,7 +1441,7 @@ function processTextNode(textNode, state) {
   return true;
 }
 function isEditorialContinuationBlock(blockText, state) {
-  return state.inVerseSpan && !state.inVerseMode && !hasVerseMarker(blockText) && !isVerseBreakLine(blockText);
+  return isEditorialText(state) && !hasVerseMarker(blockText) && !isVerseBreakLine(blockText) && !isSectionFlowBreakLine(blockText);
 }
 function collectTextNodes(el, skipEmbeds = true) {
   const result = [];
@@ -864,11 +1455,21 @@ function collectTextNodes(el, skipEmbeds = true) {
   }
   return result;
 }
-function styleVerseMarkers(el) {
+function styleVerseMarkers(el, options) {
+  var _a, _b, _c, _d;
   const textNodes = collectTextNodes(el, false);
-  const state = { inVerseSpan: false, inVerseMode: true };
+  const state = (options == null ? void 0 : options.fullText) !== void 0 && options.sourceStart !== void 0 ? verseProcessStateAt(options.fullText, options.sourceStart) : defaultVerseProcessState();
+  const renderCtx = {
+    showRomanParentInNested: (_a = options == null ? void 0 : options.showRomanParentInNested) != null ? _a : getShowRomanParentInNestedVerses(),
+    sourceText: options == null ? void 0 : options.fullText,
+    sourceOffset: options == null ? void 0 : options.sourceStart
+  };
+  let cursor = (_b = options == null ? void 0 : options.sourceStart) != null ? _b : 0;
   for (const tn of textNodes) {
-    processTextNode(tn, state);
+    const len = (_d = (_c = tn.nodeValue) == null ? void 0 : _c.length) != null ? _d : 0;
+    renderCtx.sourceOffset = cursor;
+    processTextNode(tn, state, renderCtx);
+    cursor += len;
   }
 }
 function collectVerseAnchors(el, allowShorthand = false) {
@@ -913,23 +1514,28 @@ function hideVerseBreakBlock(el, ctx) {
   if (!info)
     return;
   const blockText = info.text.split("\n").slice(info.lineStart, info.lineEnd + 1).join("\n");
-  if (!isVerseBreakLine(blockText))
+  if (!isVerseBreakLine(blockText) && !isSectionFlowBreakLine(blockText))
     return;
   el.addClass("verse-break");
   el.empty();
   el.setAttr("aria-hidden", "true");
 }
 function versePostProcessor(el, ctx) {
-  let state = { inVerseSpan: false, inVerseMode: true };
+  var _a, _b, _c;
+  if (el.closest(".verse-hover-preview, .verse-embed-preview")) {
+    return;
+  }
+  let state = defaultVerseProcessState();
   let blockText = "";
+  let sectionInfo = null;
   if (ctx) {
-    const info = ctx.getSectionInfo(el);
-    if (info) {
-      const lines = info.text.split("\n");
-      blockText = lines.slice(info.lineStart, info.lineEnd + 1).join("\n");
+    sectionInfo = ctx.getSectionInfo(el);
+    if (sectionInfo) {
+      const lines = sectionInfo.text.split("\n");
+      blockText = lines.slice(sectionInfo.lineStart, sectionInfo.lineEnd + 1).join("\n");
       state = verseProcessStateAt(
-        info.text,
-        charOffsetForLine(info.text, info.lineStart)
+        sectionInfo.text,
+        charOffsetForLine(sectionInfo.text, sectionInfo.lineStart)
       );
     }
   }
@@ -942,9 +1548,18 @@ function versePostProcessor(el, ctx) {
       injectPartAnchor(el, partId);
     return;
   }
+  const renderCtx = {
+    showRomanParentInNested: getShowRomanParentInNestedVerses(),
+    sourceText: sectionInfo == null ? void 0 : sectionInfo.text,
+    sourceOffset: sectionInfo ? charOffsetForLine(sectionInfo.text, sectionInfo.lineStart) : void 0
+  };
+  let sourceCursor = (_a = renderCtx.sourceOffset) != null ? _a : 0;
   const textNodes = collectTextNodes(el);
   for (const tn of textNodes) {
-    processTextNode(tn, state);
+    const len = (_c = (_b = tn.nodeValue) == null ? void 0 : _b.length) != null ? _c : 0;
+    renderCtx.sourceOffset = sourceCursor;
+    processTextNode(tn, state, renderCtx);
+    sourceCursor += len;
   }
   if (ctx) {
     hideVerseBreakBlock(el, ctx);
@@ -955,39 +1570,7 @@ function versePostProcessor(el, ctx) {
 }
 
 // src/commands.ts
-var import_obsidian = require("obsidian");
-function markerLabel(token) {
-  const { number, part } = parseMarkerToken(token);
-  return `${number}${part != null ? part : ""}`;
-}
-function nearestVerseAtOffset(text, cursorOffset) {
-  const re = getVerseRegex();
-  let match;
-  let best = null;
-  let bestDist = Infinity;
-  while ((match = execVerseMarker(re, text)) !== null) {
-    const start = match.index;
-    const end = start + match[0].length;
-    const dist = Math.min(Math.abs(cursorOffset - start), Math.abs(cursorOffset - end));
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = markerLabel(match[0]);
-    }
-  }
-  return best;
-}
-function verseRangeInSelection(text, selFrom, selTo) {
-  const slice = text.slice(selFrom, selTo);
-  const re = getVerseRegex();
-  const found = [];
-  let match;
-  while ((match = execVerseMarker(re, slice)) !== null) {
-    found.push(markerLabel(match[0]));
-  }
-  if (found.length < 2)
-    return null;
-  return { first: found[0], last: found[found.length - 1] };
-}
+var import_obsidian2 = require("obsidian");
 function registerCommands(plugin) {
   plugin.addCommand({
     id: "copy-verse-reference",
@@ -1002,15 +1585,16 @@ function registerCommands(plugin) {
         offset += lines[i].length + 1;
       }
       offset += cursor.ch;
-      const verseNum = nearestVerseAtOffset(fullText, offset);
-      if (verseNum === null) {
-        new import_obsidian.Notice("No verse marker found near cursor.");
+      const ref = nearestVerseRefAtOffset(fullText, offset);
+      if (ref === null) {
+        new import_obsidian2.Notice("No verse marker found near cursor.");
         return;
       }
       const fileName = (_b = (_a = plugin.app.workspace.getActiveFile()) == null ? void 0 : _a.basename) != null ? _b : "";
-      const ref = `[[${fileName}#verse-${verseNum}]]`;
-      void navigator.clipboard.writeText(ref).then(() => {
-        new import_obsidian.Notice(`Copied: ${ref}`);
+      const label = verseRefToLabel(ref);
+      const link = `[[${fileName}#verse-${label}]]`;
+      void navigator.clipboard.writeText(link).then(() => {
+        new import_obsidian2.Notice(`Copied: ${link}`);
       });
     }
   });
@@ -1023,7 +1607,7 @@ function registerCommands(plugin) {
       const from = editor.getCursor("from");
       const to = editor.getCursor("to");
       if (from.line === to.line && from.ch === to.ch) {
-        new import_obsidian.Notice("Select a range spanning at least two verse markers.");
+        new import_obsidian2.Notice("Select a range spanning at least two verse markers.");
         return;
       }
       const lines = fullText.split("\n");
@@ -1035,22 +1619,24 @@ function registerCommands(plugin) {
       };
       const selFrom = toOffset(from);
       const selTo = toOffset(to);
-      const range = verseRangeInSelection(fullText, selFrom, selTo);
-      if (!range) {
-        new import_obsidian.Notice("Selection must span at least two verse markers.");
+      const refs = verseRefsInSelection(fullText, selFrom, selTo);
+      if (refs.length < 2) {
+        new import_obsidian2.Notice("Selection must span at least two verse markers.");
         return;
       }
       const fileName = (_b = (_a = plugin.app.workspace.getActiveFile()) == null ? void 0 : _a.basename) != null ? _b : "";
-      const ref = `[[${fileName}#verse-${range.first}:${range.last}]]`;
-      void navigator.clipboard.writeText(ref).then(() => {
-        new import_obsidian.Notice(`Copied: ${ref}`);
+      const first = verseRefToLabel(refs[0]);
+      const last = verseRefToLabel(refs[refs.length - 1]);
+      const link = `[[${fileName}#verse-${first}:${last}]]`;
+      void navigator.clipboard.writeText(link).then(() => {
+        new import_obsidian2.Notice(`Copied: ${link}`);
       });
     }
   });
 }
 
 // src/references.ts
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/highlights.ts
 var HEADING_LINE_REGEX2 = /^\s*#{1,6}\s+\S.*$/;
@@ -1205,7 +1791,7 @@ var import_state = require("@codemirror/state");
 var import_view2 = require("@codemirror/view");
 
 // src/nativeFlash.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 var import_view = require("@codemirror/view");
 var VERSE_HIGHLIGHT_ACTIVE_CLASS = "verse-highlight-active";
 function isVerseHighlightActive() {
@@ -1277,17 +1863,17 @@ function patchMarkdownView(view) {
 }
 function registerNativeFlashPrevention(plugin) {
   plugin.app.workspace.iterateAllLeaves((leaf) => {
-    if (leaf.view instanceof import_obsidian2.MarkdownView)
+    if (leaf.view instanceof import_obsidian3.MarkdownView)
       patchMarkdownView(leaf.view);
   });
   plugin.registerEvent(
     plugin.app.workspace.on("active-leaf-change", () => {
-      patchMarkdownView(plugin.app.workspace.getActiveViewOfType(import_obsidian2.MarkdownView));
+      patchMarkdownView(plugin.app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView));
     })
   );
   plugin.registerEvent(
     plugin.app.workspace.on("file-open", () => {
-      patchMarkdownView(plugin.app.workspace.getActiveViewOfType(import_obsidian2.MarkdownView));
+      patchMarkdownView(plugin.app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView));
     })
   );
 }
@@ -1592,26 +2178,34 @@ function applyBlockquotePrefix(text, prefix) {
     return text;
   return text.split("\n").map((line) => `${prefix}${line}`).join("\n");
 }
-function buildRangeCore(content, start, end, maxVerses, startPart, endPart) {
-  const limit = Math.min(end, start + Math.max(maxVerses, 1) - 1);
-  if (startPart === null && endPart === null) {
-    const raw = getVerseRangeRawText(content, start, limit);
+function buildRangeCore(content, seg, maxVerses, showRomanParentInNested) {
+  const start = seg.start;
+  const end = seg.end;
+  if (start.part === null && end.part === null) {
+    const raw = getVerseRangeRawTextByRef(content, start, end);
     if (!raw || raw.length === 0)
       return null;
-    return { markdown: raw, versesUsed: limit - start + 1 };
+    const count = enumerateCitableRefsInSegment(content, seg).length;
+    return {
+      markdown: raw,
+      versesUsed: Math.min(Math.max(count, 1), maxVerses)
+    };
   }
   const blocks = [];
-  for (let n = start; n <= limit; n++) {
-    const trimStart = n === start && startPart !== null;
-    const trimEnd = n === limit && n === end && endPart !== null;
+  let versesUsed = 0;
+  for (const ref of enumerateCitableRefsInSegment(content, seg)) {
+    if (versesUsed >= maxVerses)
+      break;
+    const trimStart = verseRefsEqual(ref, start) && start.part !== null;
+    const trimEnd = verseRefsEqual(ref, end) && end.part !== null;
     let verseText;
-    let label = `${n}`;
+    let label = verseRefToDisplayLabel(ref, showRomanParentInNested);
     if (trimStart || trimEnd) {
-      const parts = getVerseParts(content, n);
+      const parts = getVersePartsByRef(content, ref);
       if (!parts)
         continue;
-      const sliceStart = trimStart && startPart !== null ? partToIndex2(startPart) : 0;
-      const sliceEnd = trimEnd && endPart !== null ? partToIndex2(endPart) + 1 : parts.length;
+      const sliceStart = trimStart && start.part !== null ? partToIndex2(start.part) : 0;
+      const sliceEnd = trimEnd && end.part !== null ? partToIndex2(end.part) + 1 : parts.length;
       if (sliceStart < 0 || sliceStart >= parts.length)
         continue;
       if (sliceEnd <= sliceStart)
@@ -1620,40 +2214,55 @@ function buildRangeCore(content, start, end, maxVerses, startPart, endPart) {
       if (sliced.length === 0)
         continue;
       verseText = sliced.join(" ");
-      if (trimStart)
-        label = `${n}${startPart}`;
+      if (trimStart && start.part !== null) {
+        label = verseRefToDisplayLabel(
+          { ...ref, part: start.part },
+          showRomanParentInNested
+        );
+      }
     } else {
-      verseText = getVerseContent(content, n);
+      verseText = getVerseContentByRef(content, ref);
       if (verseText === null)
         continue;
     }
     const line = `${verseMarkerLabel(label)} ${verseText}`;
-    blocks.push(applyBlockquotePrefix(line, verseBlockquotePrefix(content, n)));
+    blocks.push(
+      applyBlockquotePrefix(line, verseBlockquotePrefixByRef(content, ref))
+    );
+    versesUsed++;
   }
   if (blocks.length === 0)
     return null;
-  return { markdown: blocks.join("\n\n"), versesUsed: limit - start + 1 };
+  return { markdown: blocks.join("\n\n"), versesUsed };
 }
-function buildSingleCore(content, verse, part) {
-  const prefix = verseBlockquotePrefix(content, verse);
+function buildSingleCore(content, ref, showRomanParentInNested) {
+  const part = ref.part;
+  if (ref.number === null) {
+    const raw = getVerseRangeRawTextByRef(content, ref, ref);
+    return raw && raw.length > 0 ? raw : null;
+  }
+  const prefix = verseBlockquotePrefixByRef(content, ref);
   if (part !== null) {
-    const verseText = getVerseContent(content, verse, part);
+    const verseText = getVerseContentByRef(content, ref);
     if (verseText === null || verseText.length === 0)
       return null;
-    const line = `${verseMarkerLabel(`${verse}${part}`)} ${verseText}`;
+    const line = `${verseMarkerLabel(verseRefToDisplayLabel(ref, showRomanParentInNested))} ${verseText}`;
     return applyBlockquotePrefix(line, prefix);
   }
-  const fragments = getVerseFragments(content, verse);
+  const baseRef = { ...ref, part: null };
+  const fragments = getVerseFragmentsByRef(content, baseRef);
   if (fragments.length === 0)
     return null;
-  if (fragments.length === 1 && fragments[0].part === null) {
-    const raw = getVerseRangeRawText(content, verse, verse);
-    if (raw && raw.length > 0) {
+  if (fragments.length === 1 && fragments[0].part === null && segmentIsDegenerateSingle({ start: ref, end: ref })) {
+    const raw = getVerseRangeRawTextByRef(content, ref, ref);
+    if (raw && raw.length > 0)
       return raw;
-    }
   }
   const blocks = fragments.filter((f) => f.content.length > 0).map((f) => {
-    const label = f.part ? `${verse}${f.part}` : `${verse}`;
+    const label = f.part ? verseRefToDisplayLabel(
+      { ...baseRef, part: f.part },
+      showRomanParentInNested
+    ) : verseRefToDisplayLabel(baseRef, showRomanParentInNested);
     const line = `${verseMarkerLabel(label)} ${f.content}`;
     return applyBlockquotePrefix(line, prefix);
   });
@@ -1661,41 +2270,76 @@ function buildSingleCore(content, verse, part) {
     return null;
   return blocks.join("\n\n");
 }
-async function buildSegmentsPreviewMarkdown(app, file, segments, maxVerses, showFootnotes = true) {
+function versePreviewNotFoundMarkdown(subpath, fileBasename) {
+  return `##### Unable to find \u201C${subpath}\u201D in ${fileBasename}`;
+}
+async function renderVersePreviewNotFound(app, parent, file, component, subpath, previewCls = "markdown-rendered") {
+  const content = parent.createDiv({ cls: "markdown-embed-content" });
+  const preview = content.createDiv({ cls: previewCls });
+  await import_obsidian4.MarkdownRenderer.render(
+    app,
+    versePreviewNotFoundMarkdown(subpath, file.basename),
+    preview,
+    file.path,
+    component
+  );
+}
+function wireVerseEmbedOpenLink(embedEl, onClick) {
+  const openLink = embedEl.createEl("a", {
+    cls: "markdown-embed-link",
+    attr: { "aria-label": "Open link" }
+  });
+  (0, import_obsidian4.setIcon)(openLink, "lucide-maximize-2");
+  openLink.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    onClick(ev);
+  });
+}
+async function buildSegmentsPreviewMarkdown(app, file, segments, maxVerses, showFootnotes = true, showRomanParentInNested = getShowRomanParentInNestedVerses()) {
   const content = await app.vault.cachedRead(file);
   const blocks = [];
   let remaining = maxVerses;
+  let sourceStart = null;
   for (const seg of segments) {
     if (remaining <= 0)
       break;
-    const isSingle = seg.start === seg.end && seg.startPart === seg.endPart;
-    if (isSingle) {
-      const core = buildSingleCore(content, seg.start, seg.startPart);
-      if (core) {
-        blocks.push(core);
-        remaining -= 1;
+    if (segmentIsDegenerateSingle(seg)) {
+      const core = buildSingleCore(content, seg.start, showRomanParentInNested);
+      if (!core)
+        return null;
+      blocks.push(core);
+      if (sourceStart === null) {
+        sourceStart = getSourceStartForRef(content, seg.start);
       }
+      remaining -= 1;
     } else {
       const core = buildRangeCore(
         content,
-        seg.start,
-        seg.end,
+        seg,
         remaining,
-        seg.startPart,
-        seg.endPart
+        showRomanParentInNested
       );
-      if (core) {
-        blocks.push(core.markdown);
-        remaining -= core.versesUsed;
+      if (!core)
+        return null;
+      blocks.push(core.markdown);
+      if (sourceStart === null) {
+        sourceStart = getSourceStartForRef(content, seg.start);
       }
+      remaining -= core.versesUsed;
     }
   }
   if (blocks.length === 0)
     return null;
-  const markdown = blocks.join("\n\n");
+  let markdown = blocks.join("\n\n");
   if (!showFootnotes)
-    return stripAllFootnoteRefs(markdown);
-  return finalizePreviewMarkdown(markdown, content);
+    markdown = stripAllFootnoteRefs(markdown);
+  else
+    markdown = finalizePreviewMarkdown(markdown, content);
+  return {
+    markdown,
+    sourceStart: sourceStart != null ? sourceStart : 0
+  };
 }
 function getPagePreviewInstance(app) {
   var _a, _b, _c;
@@ -1758,7 +2402,7 @@ function registerVerseLinkNavigation(plugin) {
         filePart,
         sourcePath
       );
-      if (file instanceof import_obsidian3.TFile) {
+      if (file instanceof import_obsidian4.TFile) {
         const handled = await resolveVerseLink(
           plugin.app,
           file,
@@ -1784,12 +2428,12 @@ function openVersePopover(plugin, hoverParent, targetEl, linktext, sourcePath) {
   const filePart = linktext.slice(0, hashIndex);
   const fragment = linktext.slice(hashIndex + 1);
   const file = plugin.app.metadataCache.getFirstLinkpathDest(filePart, sourcePath);
-  if (!(file instanceof import_obsidian3.TFile))
+  if (!(file instanceof import_obsidian4.TFile))
     return;
   const current = hoverParent.hoverPopover;
   if (current && current.__verseTargetEl === targetEl)
     return;
-  const popover = new import_obsidian3.HoverPopover(hoverParent, targetEl);
+  const popover = new import_obsidian4.HoverPopover(hoverParent, targetEl);
   popover.__verseTargetEl = targetEl;
   popover.hoverPopover = null;
   popover.hoverEl.addClass("verse-hover-preview");
@@ -1816,17 +2460,17 @@ function hidePopover(popover) {
     popover.unload();
 }
 async function renderVersePopover(plugin, popover, isAlive, file, fragment, sourcePath, allowShorthand) {
-  var _a, _b;
+  var _a;
   const segments = parseVerseSegments(fragment, allowShorthand);
-  if (!segments)
-    return;
-  const markdown = await buildSegmentsPreviewMarkdown(
+  const previewData = segments ? await buildSegmentsPreviewMarkdown(
     plugin.app,
     file,
     segments,
-    plugin.settings.hoverPreviewMaxVerses
-  );
-  if (!isAlive() || !markdown)
+    plugin.settings.hoverPreviewMaxVerses,
+    plugin.settings.showFootnotesInPopovers,
+    plugin.settings.showRomanParentInNestedVerses
+  ) : null;
+  if (!isAlive())
     return;
   const hoverEl = popover.hoverEl;
   const win = (_a = hoverEl.ownerDocument.defaultView) != null ? _a : window;
@@ -1838,13 +2482,27 @@ async function renderVersePopover(plugin, popover, isAlive, file, fragment, sour
   }
   if (!isAlive())
     return;
+  if (!segments || !previewData) {
+    await renderVersePopoverNotFound(
+      plugin,
+      popover,
+      hoverEl,
+      file,
+      fragment,
+      sourcePath
+    );
+    revealVersePopover(popover, hoverEl);
+    return;
+  }
+  const { markdown, sourceStart } = previewData;
+  const fileContent = await plugin.app.vault.cachedRead(file);
   hoverEl.empty();
   const embed = hoverEl.createDiv({ cls: "markdown-embed is-loaded" });
   const content = embed.createDiv({ cls: "markdown-embed-content" });
   const preview = content.createDiv({
     cls: "markdown-preview-view markdown-rendered"
   });
-  await import_obsidian3.MarkdownRenderer.render(
+  await import_obsidian4.MarkdownRenderer.render(
     plugin.app,
     convertHighlightSyntaxToHtml(markdown),
     preview,
@@ -1853,20 +2511,41 @@ async function renderVersePopover(plugin, popover, isAlive, file, fragment, sour
   );
   if (!isAlive())
     return;
-  applyFootnotePreviewDisplay(preview, plugin.settings.showFootnotesInPopovers);
-  const openLink = embed.createEl("a", {
-    cls: "markdown-embed-link",
-    attr: { "aria-label": "Open link" }
+  styleVerseMarkers(preview, {
+    fullText: fileContent,
+    sourceStart,
+    showRomanParentInNested: plugin.settings.showRomanParentInNestedVerses
   });
-  (0, import_obsidian3.setIcon)(openLink, "lucide-maximize-2");
-  openLink.addEventListener("click", (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
+  applyFootnotePreviewDisplay(preview, plugin.settings.showFootnotesInPopovers);
+  wireVerseEmbedOpenLink(embed, () => {
     hidePopover(popover);
     void resolveVerseLink(plugin.app, file, fragment, allowShorthand);
   });
   wirePopoverAnchors(plugin, preview, popover, sourcePath);
-  const targetEl = (_b = popover.__verseTargetEl) != null ? _b : null;
+  revealVersePopover(popover, hoverEl);
+}
+async function renderVersePopoverNotFound(plugin, popover, hoverEl, file, fragment, sourcePath) {
+  hoverEl.empty();
+  const embed = hoverEl.createDiv({ cls: "markdown-embed is-loaded" });
+  await renderVersePreviewNotFound(
+    plugin.app,
+    embed,
+    file,
+    popover,
+    fragment,
+    "markdown-preview-view markdown-rendered"
+  );
+  wireVerseEmbedOpenLink(embed, () => {
+    hidePopover(popover);
+    void plugin.app.workspace.openLinkText(
+      `${file.basename}#${fragment}`,
+      sourcePath
+    );
+  });
+}
+function revealVersePopover(popover, hoverEl) {
+  var _a;
+  const targetEl = (_a = popover.__verseTargetEl) != null ? _a : null;
   if (targetEl)
     positionVersePopover(hoverEl, targetEl);
   hoverEl.removeClass("verse-hover-measuring");
@@ -1920,7 +2599,7 @@ function wirePopoverAnchors(plugin, contentEl, popover, sourcePath) {
         filePart,
         sourcePath
       );
-      if (!(file instanceof import_obsidian3.TFile))
+      if (!(file instanceof import_obsidian4.TFile))
         return;
       ev.preventDefault();
       ev.stopPropagation();
@@ -1940,10 +2619,10 @@ function wirePopoverAnchors(plugin, contentEl, popover, sourcePath) {
   }
 }
 function markdownViewForFile(app, leaf, file) {
-  if (leaf.view instanceof import_obsidian3.MarkdownView && leaf.view.file === file) {
+  if (leaf.view instanceof import_obsidian4.MarkdownView && leaf.view.file === file) {
     return leaf.view;
   }
-  const active = app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView);
+  const active = app.workspace.getActiveViewOfType(import_obsidian4.MarkdownView);
   if ((active == null ? void 0 : active.file) === file)
     return active;
   return null;
@@ -1967,25 +2646,31 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false, opt
   const segments = parseVerseSegments(fragment, allowShorthand);
   if (!segments || segments.length === 0)
     return false;
-  let startVerse = segments[0].start;
-  let startPart = segments[0].startPart;
-  const activeMd = app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView);
+  const startRef = segments[0].start;
+  const activeMd = app.workspace.getActiveViewOfType(import_obsidian4.MarkdownView);
   const leaf = (options == null ? void 0 : options.newLeaf) ? app.workspace.getLeaf(true) : (_a = activeMd == null ? void 0 : activeMd.leaf) != null ? _a : app.workspace.getMostRecentLeaf();
   if (!leaf)
     return false;
   const content = await app.vault.cachedRead(file);
   const flashSegments = segments.map((seg) => ({
-    start: seg.start,
-    startPart: partHasAnchor(content, seg.start, seg.startPart) ? seg.startPart : null,
-    end: seg.end,
-    endPart: partHasAnchor(content, seg.end, seg.endPart) ? seg.endPart : null
+    start: {
+      ...seg.start,
+      part: partHasAnchorByRef(content, seg.start) ? seg.start.part : null
+    },
+    end: {
+      ...seg.end,
+      part: partHasAnchorByRef(content, seg.end) ? seg.end.part : null
+    }
   }));
-  startPart = flashSegments[0].startPart;
-  const targetLine = findVerseLine(content, startVerse);
-  const primaryId = startPart ? `verse-${startVerse}${startPart}` : `verse-${startVerse}`;
-  const firstPart = firstFragmentPart(content, startVerse);
-  const fallbackId = !startPart && firstPart ? `verse-${startVerse}${firstPart}` : `verse-${startVerse}`;
-  const mdViewBefore = leaf.view instanceof import_obsidian3.MarkdownView ? leaf.view : null;
+  const navStart = flashSegments[0].start;
+  const targetLine = findVerseLineByRef(content, navStart);
+  const primaryId = verseRefToAnchorId(navStart);
+  const firstPart = firstFragmentPartByRef(content, {
+    ...navStart,
+    part: null
+  });
+  const fallbackId = navStart.part === null && firstPart && navStart.number !== null ? verseRefToAnchorId({ ...navStart, part: firstPart }) : primaryId;
+  const mdViewBefore = leaf.view instanceof import_obsidian4.MarkdownView ? leaf.view : null;
   const isLivePreviewBefore = (mdViewBefore == null ? void 0 : mdViewBefore.getMode()) === "source" && mdViewBefore.file === file;
   const sameFileOpen = (mdViewBefore == null ? void 0 : mdViewBefore.file) === file;
   const anchorAlreadyMounted = sameFileOpen && !isLivePreviewBefore && mdViewBefore !== null && verseAnchorMounted(
@@ -2045,7 +2730,7 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false, opt
         }
       });
     }
-    flashVerseSegments(flashSegments, previewRoot);
+    flashVerseSegments(flashSegments, previewRoot, content);
   }
   return true;
 }
@@ -2133,8 +2818,8 @@ function clearReadingViewHighlight(fadeOut = true) {
     flashFadeTimer = null;
   }, FLASH_FADE_MS2);
 }
-function flashVerseSegments(segments, root) {
-  const flashRanges = buildVerseFlashRanges(segments, root);
+function flashVerseSegments(segments, root, text) {
+  const flashRanges = buildVerseFlashRanges(segments, root, text);
   if (flashRanges.length === 0)
     return;
   clearReadingViewHighlight(false);
@@ -2229,34 +2914,17 @@ function unwrapFlashSpans() {
   }
   activeFlashSpans = [];
 }
-function anchorInSegment(n, part, seg) {
-  if (n < seg.start || n > seg.end)
-    return false;
-  if (n === seg.start && seg.startPart !== null) {
-    if (part === null)
-      return false;
-    if (part.charCodeAt(0) < seg.startPart.charCodeAt(0))
-      return false;
-  }
-  if (n === seg.end && seg.endPart !== null && part !== null) {
-    if (part.charCodeAt(0) > seg.endPart.charCodeAt(0))
-      return false;
-  }
-  return true;
-}
-function collectInSegmentsAnchors(segments, root) {
-  var _a;
+function collectInSegmentsAnchors(segments, root, text) {
   const all = root.querySelectorAll('[id^="verse-"]');
   const inRange = [];
   for (let i = 0; i < all.length; i++) {
     const el = all[i];
-    const m = /^verse-(\d+)([a-z]+)?$/.exec(el.id);
-    if (!m)
+    const ref = parseVerseRefEndpoint(el.id.slice("verse-".length));
+    if (!ref)
       continue;
-    const n = parseInt(m[1], 10);
-    const part = (_a = m[2]) != null ? _a : null;
-    if (segments.some((seg) => anchorInSegment(n, part, seg)))
+    if (segments.some((seg) => anchorRefIsInSegment(text, ref, seg))) {
       inRange.push(el);
+    }
   }
   return inRange;
 }
@@ -2281,15 +2949,16 @@ function findFlashStopBetween(a, b, includeHeadings, root) {
   }
   return null;
 }
-function buildVerseFlashRanges(segments, root) {
+function buildVerseFlashRanges(segments, root, text) {
   var _a;
-  const inRange = collectInSegmentsAnchors(segments, root);
+  const inRange = collectInSegmentsAnchors(segments, root, text);
   if (inRange.length === 0)
     return [];
   const allValidAnchors = [];
   const all = root.querySelectorAll('[id^="verse-"]');
   for (let i = 0; i < all.length; i++) {
-    if (/^verse-\d+[a-z]*$/.test(all[i].id))
+    const ref = parseVerseRefEndpoint(all[i].id.slice("verse-".length));
+    if (ref)
       allValidAnchors.push(all[i]);
   }
   const inRangeSet = new Set(inRange);
@@ -2333,7 +3002,7 @@ function buildVerseFlashRanges(segments, root) {
 }
 
 // src/embeds.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 var verseEmbedInstances = /* @__PURE__ */ new Set();
 function refreshAllVerseEmbeds() {
   for (const embed of verseEmbedInstances) {
@@ -2349,7 +3018,7 @@ function wrapAsDocumentBlocks(preview) {
     wrapper.appendChild(child);
   }
 }
-var VerseEmbed = class extends import_obsidian4.Component {
+var VerseEmbed = class extends import_obsidian5.Component {
   constructor(plugin, ctx, file, fragment) {
     super();
     this.plugin = plugin;
@@ -2375,39 +3044,52 @@ var VerseEmbed = class extends import_obsidian4.Component {
     const myToken = ++this.renderToken;
     const allowShorthand = this.plugin.settings.enableShorthandSyntax;
     const segments = parseVerseSegments(this.fragment, allowShorthand);
-    let markdown = null;
+    let previewData = null;
     if (segments) {
-      markdown = await buildSegmentsPreviewMarkdown(
+      previewData = await buildSegmentsPreviewMarkdown(
         this.plugin.app,
         this.file,
         segments,
         this.plugin.settings.hoverPreviewMaxVerses,
-        this.plugin.settings.showFootnotesInEmbeds
+        this.plugin.settings.showFootnotesInEmbeds,
+        this.plugin.settings.showRomanParentInNestedVerses
       );
     }
     if (myToken !== this.renderToken)
       return;
     const container = this.ctx.containerEl;
     container.empty();
-    container.removeClass("verse-embed-empty");
     container.addClasses(["markdown-embed", "is-loaded", "verse-embed"]);
     container.createDiv({
       cls: "embed-title markdown-embed-title",
       text: this.file.basename
     });
-    if (!markdown) {
-      container.addClass("verse-embed-empty");
-      container.createDiv({
-        cls: "markdown-embed-content",
-        text: `Couldn't find "${this.fragment}"`
+    if (!previewData) {
+      await renderVersePreviewNotFound(
+        this.plugin.app,
+        container,
+        this.file,
+        this,
+        this.fragment,
+        "markdown-rendered verse-embed-preview"
+      );
+      wireVerseEmbedOpenLink(container, () => {
+        void resolveVerseLink(
+          this.plugin.app,
+          this.file,
+          this.fragment,
+          allowShorthand
+        );
       });
       return;
     }
+    const { markdown, sourceStart } = previewData;
+    const fileContent = await this.plugin.app.vault.cachedRead(this.file);
     const content = container.createDiv({ cls: "markdown-embed-content" });
     const preview = content.createDiv({
       cls: "markdown-rendered verse-embed-preview"
     });
-    await import_obsidian4.MarkdownRenderer.render(
+    await import_obsidian5.MarkdownRenderer.render(
       this.plugin.app,
       convertHighlightSyntaxToHtml(markdown),
       preview,
@@ -2416,16 +3098,13 @@ var VerseEmbed = class extends import_obsidian4.Component {
     );
     if (myToken !== this.renderToken)
       return;
-    styleVerseMarkers(preview);
-    wrapAsDocumentBlocks(preview);
-    const link = container.createEl("a", {
-      cls: "markdown-embed-link",
-      attr: { "aria-label": "Open link" }
+    styleVerseMarkers(preview, {
+      fullText: fileContent,
+      sourceStart,
+      showRomanParentInNested: this.plugin.settings.showRomanParentInNestedVerses
     });
-    (0, import_obsidian4.setIcon)(link, "lucide-maximize-2");
-    link.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
+    wrapAsDocumentBlocks(preview);
+    wireVerseEmbedOpenLink(container, () => {
       void resolveVerseLink(
         this.plugin.app,
         this.file,
@@ -2598,7 +3277,7 @@ function pushFootnoteEditingMarks(specs, matchFrom, matchTo) {
     decoration: bracketReplaceDecoration("]", flashClass)
   });
 }
-function pushBracketLabelMarks(specs, tokenFrom, tokenTo) {
+function pushBracketLabelMarks(specs, tokenFrom, tokenTo, innerClass = "verse-marker") {
   specs.push(
     {
       from: tokenFrom,
@@ -2608,7 +3287,7 @@ function pushBracketLabelMarks(specs, tokenFrom, tokenTo) {
     {
       from: tokenFrom + 1,
       to: tokenTo - 1,
-      decoration: import_view3.Decoration.mark({ class: "verse-marker" })
+      decoration: import_view3.Decoration.mark({ class: innerClass })
     },
     {
       from: tokenTo - 1,
@@ -2616,6 +3295,17 @@ function pushBracketLabelMarks(specs, tokenFrom, tokenTo) {
       decoration: import_view3.Decoration.mark({ class: "verse-marker-bracket" })
     }
   );
+}
+function pushMarkerDecorations(specs, view, fullText, matchFrom, matchTo, label) {
+  const beforeFootnote = isFollowedByFootnoteRef(fullText, matchTo);
+  const touching = beforeFootnote && selectionTouchesMarker(view, matchFrom, matchTo);
+  if (beforeFootnote && touching) {
+    pushFootnoteEditingMarks(specs, matchFrom, matchTo);
+  } else if (beforeFootnote) {
+    pushFootnoteWidgetMarks(specs, matchFrom, matchTo, label);
+  } else {
+    pushBracketLabelMarks(specs, matchFrom, matchTo);
+  }
 }
 function collectDecorationSpecs(view) {
   const doc = view.state.doc;
@@ -2625,21 +3315,18 @@ function collectDecorationSpecs(view) {
   for (const { from, to } of view.visibleRanges) {
     let pos = from;
     while (pos < to) {
-      const slice = doc.sliceString(pos, to);
-      const brRel = findVerseBreakIndex(slice);
-      const markerRe = getVerseRegex();
-      const m = execVerseMarker(markerRe, slice);
-      const brIdx = brRel === -1 ? -1 : pos + brRel;
-      const markerIdx = m ? pos + m.index : -1;
-      if (brIdx === -1 && markerIdx === -1)
+      const tok = nextProcessToken(fullText, pos, to);
+      if (!tok)
         break;
-      if (markerIdx === -1 || brIdx !== -1 && brIdx < markerIdx) {
-        const breakFrom = brIdx;
-        const breakTo = brIdx + VERSE_BREAK_TOKEN.length;
+      if (tok.kind === "verseBreak" || tok.kind === "flowBreak") {
+        const breakFrom = tok.index;
+        const breakTo = tok.index + tok.length;
         if (markerInsideHighlight(breakFrom, breakTo, highlights)) {
+          const innerFrom = breakFrom + 1;
+          const innerTo = breakTo - 1;
           specs.push({
-            from: breakFrom + 1,
-            to: breakTo - 1,
+            from: innerFrom,
+            to: innerTo,
             decoration: import_view3.Decoration.mark({ class: "verse-marker" })
           });
         } else {
@@ -2648,22 +3335,18 @@ function collectDecorationSpecs(view) {
         pos = breakTo;
         continue;
       }
-      const matchFrom = markerIdx;
-      const matchTo = markerIdx + m[0].length;
-      const beforeFootnote = isFollowedByFootnoteRef(fullText, matchTo);
-      const touching = beforeFootnote && selectionTouchesMarker(view, matchFrom, matchTo);
-      if (beforeFootnote && touching) {
-        pushFootnoteEditingMarks(specs, matchFrom, matchTo);
-      } else if (beforeFootnote) {
-        pushFootnoteWidgetMarks(
-          specs,
-          matchFrom,
-          matchTo,
-          m[0].slice(1, -1)
-        );
-      } else {
-        pushBracketLabelMarks(specs, matchFrom, matchTo);
-      }
+      const raw = tok.raw;
+      const matchFrom = raw.index;
+      const matchTo = raw.index + raw.length;
+      const label = raw.kind === "roman" ? raw.roman : raw.token.slice(1, -1);
+      pushMarkerDecorations(
+        specs,
+        view,
+        fullText,
+        matchFrom,
+        matchTo,
+        label
+      );
       pos = matchTo;
     }
   }
@@ -2697,16 +3380,17 @@ function verseMarkerLivePreviewExtension() {
 }
 
 // src/settings.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 var DEFAULT_SETTINGS = {
   enableHoverPreviews: true,
   hoverPreviewMaxVerses: 20,
   enableShorthandSyntax: false,
   keepHighlightUntilClick: false,
   showFootnotesInPopovers: true,
-  showFootnotesInEmbeds: true
+  showFootnotesInEmbeds: true,
+  showRomanParentInNestedVerses: true
 };
-var VerseMarkersSettingTab = class extends import_obsidian5.PluginSettingTab {
+var VerseMarkersSettingTab = class extends import_obsidian6.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -2714,7 +3398,7 @@ var VerseMarkersSettingTab = class extends import_obsidian5.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian5.Setting(containerEl).setName("Reference syntax").setHeading();
+    new import_obsidian6.Setting(containerEl).setName("Reference syntax").setHeading();
     const syntaxEl = containerEl.createEl("div", {
       cls: "setting-item-description verse-markers-syntax-ref"
     });
@@ -2727,13 +3411,13 @@ var VerseMarkersSettingTab = class extends import_obsidian5.PluginSettingTab {
     syntaxEl.appendText(
       "Shorthand (opt-in below) \u2014 [[File#3]] / [[File#3a]] / [[File#3:7]]"
     );
-    new import_obsidian5.Setting(containerEl).setName("Enable range hover previews").setDesc("Show a popover with verse content when hovering over [[FILE#verse-N:M]] links.").addToggle(
+    new import_obsidian6.Setting(containerEl).setName("Enable range hover previews").setDesc("Show a popover with verse content when hovering over [[FILE#verse-N:M]] links.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableHoverPreviews).onChange(async (value) => {
         this.plugin.settings.enableHoverPreviews = value;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Enable shorthand reference syntax").setDesc(
+    new import_obsidian6.Setting(containerEl).setName("Enable shorthand reference syntax").setDesc(
       'Recognize [[File#3]] and [[File#3:7]] in addition to the default [[File#verse-3]] form. Warning: enabling this will intercept links to headings literally named "3" or "3:7".'
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableShorthandSyntax).onChange(async (value) => {
@@ -2741,8 +3425,8 @@ var VerseMarkersSettingTab = class extends import_obsidian5.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Navigation highlight").setHeading();
-    new import_obsidian5.Setting(containerEl).setName("Keep temporary highlight until click").setDesc(
+    new import_obsidian6.Setting(containerEl).setName("Navigation highlight").setHeading();
+    new import_obsidian6.Setting(containerEl).setName("Keep temporary highlight until click").setDesc(
       "When off (default), the verse highlight after navigation fades automatically after a few seconds. When on, it stays visible until you click elsewhere."
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.keepHighlightUntilClick).onChange(async (value) => {
@@ -2750,7 +3434,7 @@ var VerseMarkersSettingTab = class extends import_obsidian5.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Max verses in hover preview").setDesc("Maximum number of verses to display in a range hover preview.").addText(
+    new import_obsidian6.Setting(containerEl).setName("Max verses in hover preview").setDesc("Maximum number of verses to display in a range hover preview.").addText(
       (text) => text.setPlaceholder("20").setValue(String(this.plugin.settings.hoverPreviewMaxVerses)).onChange(async (value) => {
         const num = parseInt(value, 10);
         if (!isNaN(num) && num > 0) {
@@ -2759,8 +3443,19 @@ var VerseMarkersSettingTab = class extends import_obsidian5.PluginSettingTab {
         }
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Show footnotes").setHeading();
-    new import_obsidian5.Setting(containerEl).setName("Show footnotes in popovers").setDesc(
+    new import_obsidian6.Setting(containerEl).setName("Hierarchical display").setHeading();
+    new import_obsidian6.Setting(containerEl).setName("Show Roman parent in nested verses").setDesc(
+      "When on (default), nested verses display as I.1, II.3, etc., and a Roman marker immediately before its first nested verse is hidden so labels are not duplicated. When off, the Roman marker is shown and nested verses use Arabic numbers only (1, 2, \u2026). A Roman section with no nested verses always shows the Roman marker."
+    ).addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.showRomanParentInNestedVerses).onChange(async (value) => {
+        this.plugin.settings.showRomanParentInNestedVerses = value;
+        await this.plugin.saveSettings();
+        refreshAllVerseEmbeds();
+        refreshReadingViewVerseMarkers(this.app);
+      })
+    );
+    new import_obsidian6.Setting(containerEl).setName("Show footnotes").setHeading();
+    new import_obsidian6.Setting(containerEl).setName("Show footnotes in popovers").setDesc(
       "Show the footnote list at the bottom of hover previews. Footnote references in the verse text stay hoverable either way."
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showFootnotesInPopovers).onChange(async (value) => {
@@ -2768,7 +3463,7 @@ var VerseMarkersSettingTab = class extends import_obsidian5.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Show footnotes in embeds").setDesc(
+    new import_obsidian6.Setting(containerEl).setName("Show footnotes in embeds").setDesc(
       "Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds."
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showFootnotesInEmbeds).onChange(async (value) => {
@@ -2781,7 +3476,7 @@ var VerseMarkersSettingTab = class extends import_obsidian5.PluginSettingTab {
 };
 
 // src/main.ts
-var VerseMarkersPlugin = class extends import_obsidian6.Plugin {
+var VerseMarkersPlugin = class extends import_obsidian7.Plugin {
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new VerseMarkersSettingTab(this.app, this));
@@ -2795,6 +3490,7 @@ var VerseMarkersPlugin = class extends import_obsidian6.Plugin {
     registerVersePagePreview(this);
     registerVerseLinkNavigation(this);
     configureVerseHighlightBehavior(() => this.settings);
+    configureVerseMarkerDisplay(() => this.settings);
     registerVerseHighlightDismiss(this);
     onVerseHighlightDismiss(() => clearReadingViewHighlight());
     onVerseHighlightDismiss(() => clearActiveLivePreviewFlash());
@@ -2807,14 +3503,12 @@ var VerseMarkersPlugin = class extends import_obsidian6.Plugin {
       if (!verse || !filePath)
         return;
       const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (!(file instanceof import_obsidian6.TFile))
+      if (!(file instanceof import_obsidian7.TFile))
         return;
-      const vm = /^(\d+)([a-z]*)$/.exec(verse);
-      if (!vm)
+      const parsed = parseVerseRefEndpoint(verse);
+      if (!parsed)
         return;
-      const verseNum = parseInt(vm[1], 10);
-      const part = vm[2] || params["part"] || "";
-      const fragment = part ? `verse-${verseNum}${part}` : `verse-${verseNum}`;
+      const fragment = `verse-${verse}`;
       await resolveVerseLink(this.app, file, fragment);
     });
   }

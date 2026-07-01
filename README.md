@@ -1,22 +1,31 @@
 # Verse Markers
 
-An Obsidian plugin for inline verse numbering and cross-referencing. Write `[1]`, `[2]`, `[3]` in your notes and the plugin turns them into anchorable verse targets that you can link to from anywhere in your vault — single verses, ranges, or heading-split parts.
+An Obsidian plugin for inline verse numbering and cross-referencing. Write `[1]`, `[2]`, `[3]` in your notes and the plugin turns them into anchorable verse targets you can link to from anywhere in your vault — single verses, ranges, or heading-split parts.
 
 Originally built for study notes over scripture, but it works for any document where you want stable, per-paragraph anchors that survive edits: legal texts, play scripts, technical specs, etc.
 
 ## Features
 
-- **Inline verse markers** — Any token like `[3]` (or an authored part like `[3a]`) at the start of a line, after a blockquote `>`, after whitespace, or inside inline formatting (`==highlight==`, `**bold**`, etc.) is treated as a verse. Reading view renders it as just the label, colored with the theme's link accent. Live Preview keeps Obsidian's native `[N]` look and adds a light accent on verse digits inside `==highlight==`.
-- **Verse breaks (`[//]`)** — Inline or on its own line, `[//]` toggles between verse text and editorial asides. Odd gaps (after the 1st, 3rd, … break) are excluded from popovers, embeds, flash, and whole-verse extraction; even gaps (after the 2nd, 4th, …) are verse again. The token is hidden in reading view; Live Preview shows it styled like another verse marker.
-- **Highlight-aware extraction** — `==highlight==` syntax is preserved in popovers and embeds, and verse markers inside highlights are recognized for linking and extraction.
-- **Wiki-link references** — `[[Gospel of John#verse-3]]` jumps to verse 3 in the target file. Ranges (`verse-3:7`) and parts (`verse-3a`, `verse-3b`, …) are supported, whether a part comes from a heading/footnote split or is written into the marker itself.
-- **Disjoint (skip-verse) references** — `[[File#verse-4:6/8:10]]` cites verses 4–6 **and** 8–10 while excluding 7, for lectionary-style passages that skip verses. The popover shows only the cited verses and the temporary highlight covers each piece, leaving the gaps untouched.
+**Authoring**
+
+- **Inline verse markers** — Any token like `[3]` (or an authored part like `[3a]`) at the start of a line, after a blockquote `>`, after whitespace, or inside inline formatting (`==highlight==`, `**bold**`, etc.) is treated as a verse. Reading view renders it as just the label, colored with the theme's link accent. Live Preview keeps Obsidian's native `[N]` look.
+- **Multi-line and heading-split verses** — a verse can span multiple lines, include blockquotes, and be broken up by headings or footnotes without losing its identity.
+- **Editorial pauses (`[//]`)** — Inline or on its own line, `[//]` toggles between citeable verse text and editorial asides. Odd gaps are excluded from popovers, embeds, flash, and extraction; even gaps are citeable again. Hidden in reading view; Live Preview shows it styled like another verse marker.
 - **Authored verse parts** — markers may carry a part suffix, e.g. `[5a]`, `[5b]`, `[12bc]`. A single canonical verse can be split into scattered, separately-marked pieces (even interleaved with other verses) and still be referenced as a whole or by individual part.
+- **Verse sections** — optionally group verses under section markers (`[I]`, `[II]`, …). Verses under an active section become nested addresses (`I.1`, `II.3`); section prose before the first nested verse is citeable as `verse-I`.
+- **Verse breaks (`[///]`)** — in sectioned notes, `[///]` pauses citation: gap prose is plain markdown, excluded from popovers, embeds, flash, and extraction. Resume with a second `[///]`, a section marker, or a top-level `[N]` (see [Verse sections](#verse-sections)).
+
+**Linking & previews**
+
+- **Wiki-link references** — `[[Gospel of John#verse-3]]` jumps to verse 3 in the target file. Ranges (`verse-3:7`), parts (`verse-3a`, `verse-3b`, …), and section forms (`verse-I.3`) are supported.
+- **Disjoint (skip-verse) references** — `[[File#verse-4:6/8:10]]` cites verses 4–6 **and** 8–10 while excluding 7, for lectionary-style passages that skip verses.
 - **Hover previews for ranges** — hover a `verse-N:M` link to see the quoted verse text inline without opening the file.
-- **Verse embeds** — prefix any reference with `!` (`![[File#verse-3:7]]`) to transclude the cited verse(s) inline as a native-looking embed card, in **both reading view and Live Preview**. Single verses, ranges, authored/derived parts, and disjoint refs all work.
+- **Verse embeds** — prefix any reference with `!` (`![[File#verse-3:7]]`) to transclude the cited verse(s) inline as a native-looking embed card, in **both reading view and Live Preview**.
+
+**Workflow**
+
 - **Two "Copy reference" commands** — grab a wiki-link for the verse near your cursor, or for a selection spanning multiple verses.
 - **URI protocol handler** — `obsidian://verse-markers?file=<path>&verse=<N>&part=<a>` deep-links into a verse from outside Obsidian.
-- **Multi-line and heading-split verses** — a verse can span multiple lines, include blockquotes, and be broken up by headings without losing its identity.
 - **Opt-in shorthand syntax** — `[[File#3]]` / `[[File#3:7]]` if you enable it. Off by default because it can hijack links to headings literally named `"3"`.
 
 ## Installation
@@ -55,7 +64,7 @@ Write verse markers as bare `[N]` tokens in Markdown — or `[Na]` to carry an a
 > [6] There was a man sent from God, whose name was John. [7] He came as a witness, to bear witness about the light.
 ```
 
-Several verses can share one line — each `[N]` still starts a new verse; content runs until the next marker (or a verse break). Reading view renders each marker as the number only (brackets dropped), colored with the link accent so it visually matches the references that point to it.
+Several verses can share one line — each `[N]` still starts a new verse; content runs until the next marker (or an editorial pause). Reading view renders each marker as the number only (brackets dropped), colored with the link accent so it visually matches the references that point to it.
 
 ### Multi-line verses
 
@@ -70,21 +79,23 @@ and the darkness has not overcome it.
 
 `[[File#verse-5]]` resolves to both lines of verse 5.
 
-### Verse breaks (`[//]`)
+### Editorial pauses (`[//]`)
 
-Use `[//]` when you need editorial text in the middle of a verse without folding it into the verse flow — notes, alternate readings, or commentary between chunks of the same verse. Each `[//]` **toggles** between verse mode and editorial mode:
+Use `[//]` when you need editorial text in the middle of a verse without folding it into the verse body — notes, alternate readings, or commentary between chunks of the same verse. Each `[//]` **toggles** between citeable mode and editorial mode:
 
 ```markdown
 [27] Because death is certain for the one born, and birth is certain for the dead; therefore you should not lament the inevitable. [//] this is a comment [//] this is the continuation of the verse, and here it ends [//]
 
-==[28] The state of all beings before birth is unmanifest; their state between birth and death is manifest. [//] another break and here it continues [//] What reason is there then to lament? [29] Some consider this wonderful; others speak of it as such.==
+==[28] The state of all beings before birth is unmanifest; their state between birth and death is manifest. [//] another pause and here it continues [//] What reason is there then to lament? [29] Some consider this wonderful; others speak of it as such.==
 ```
 
 - **1st gap** (after 1st `[//]`): editorial — excluded from `[[File#verse-27]]`, popovers, embeds, and flash.
 - **2nd gap** (after 2nd `[//]`): verse again — included.
 - **3rd gap** (after 3rd `[//]`): editorial again — excluded.
 
-The token works **inline** (`…verse text[//] note`) or on its **own line** (no required blank lines or surrounding whitespace). In reading view the `[//]` token is removed entirely; editorial text stays visible. In Live Preview, `[//]` is shown with the same muted-bracket / accent-label styling as `[N]`.
+Inside [verse sections](#verse-sections), `[//]` also works in section prose (between `[I]` and the first nested `[N]`) and in nested verses. It is a no-op inside a `[///]` gap until citation flow restarts.
+
+The token works **inline** (`…verse text[//] note`) or on its **own line**. In reading view the `[//]` token is removed entirely; editorial text stays visible. In Live Preview, `[//]` and `[///]` are shown with the same muted-bracket / accent-label styling as `[N]`.
 
 ### Heading-split verses
 
@@ -149,6 +160,64 @@ Referencing behavior with scattered, interleaved fragments:
 
 When a verse uses authored part letters, those letters *are* its parts — the verse is not *also* split by any heading or footnote inside a fragment (authored markers win, so there's no double-lettering).
 
+### Verse sections
+
+For longer texts you can **group verses into sections** with Roman markers (`[I]`, `[II]`, …). When a note contains at least one section marker, verses under an active section are nested (`[1]` under `[I]` → `verse-I.1`). Verses before the first section marker stay ordinary `verse-1`, `verse-2`, … even if sections appear later.
+
+- **Section prose** — text after `[I]` and before the first nested `[N]` is `verse-I`.
+- **Nested verses** — `[N]` under a section (before the next section marker) becomes `I.N` / `II.N`.
+- **Author order** — `[II]` then `[3]` is `verse-II.3` even if `II.1` and `II.2` were never written.
+
+```markdown
+[1] Opening verse (still verse-1). [I] Section intro. [1] First under I: I.1. [2] I.2.
+
+[II] Next section. [1] II.1.
+```
+
+Section markers work inline, across lines, and in blockquotes the same way as verse markers. See [Verse breaks](#verse-breaks) for pausing citation inside sectioned notes.
+
+**Section references** (always use the explicit `verse-` prefix; shorthand `#3` does not apply):
+
+- `[[File#verse-I]]` → section I prose
+- `[[File#verse-I.2]]` → nested verse I.2
+- `[[File#verse-I.1:I.3]]` → I.1 through I.3
+- `[[File#verse-I:II]]` → whole sections I and II
+- `[[File#verse-I.3:II.2]]` → cross-section range
+
+### Verse breaks (`[///]`)
+
+In a note with [verse sections](#verse-sections), `[///]` **pauses citation**. Prose in the gap is ordinary markdown — not part of any `verse-…` body, popover, embed, or flash highlight.
+
+**Three ways to leave the gap:**
+
+| Continue with | Effect |
+|---------------|--------|
+| **Second `[///]`** (only prose between) | **Resume** the saved unit (I.2, I.1, flat 2, or section-only I) |
+| **Section `[II]`** | Citation on at the **section** tier; following `[N]` nests again (`II.N`) |
+| **Top-level `[3]`** | Citation on at the **verse** tier — `verse-3`, not `I.3` |
+
+```
+[I] [1] nested ──[///]── gap ──► [///]     → resume I.1
+                              ──► [II]    → section tier (nest follows)
+                              ──► [3]     → verse-3
+```
+
+`[///]` is a **no-op before the first section marker**. Inside a gap, `[//]` is also a no-op until a section or verse marker opens a span again.
+
+```markdown
+[I] [1] aa [///] bb [///] cc
+```
+
+`cc` continues **I.1** (paired `[///]` resume).
+
+```markdown
+[I] [1] aa [///] bb [2] cc
+```
+
+`cc` is **verse-2** (top-level re-entry), not I.1.
+
+The token works **inline** or on its **own line**. In reading view `[///]` is removed; gap text stays visible.
+
 ## Referencing verses
 
 ### Default (always on)
@@ -167,6 +236,8 @@ Range part semantics:
 - If the **start** has a part suffix (`3b:7`), the first verse shown begins at that part (earlier parts of that verse are hidden).
 - If the **end** has a part suffix (`3:7c`), the last verse shown ends at that part (later parts of that verse are hidden).
 - Clicking a range link scrolls to the start endpoint's part anchor, falling back to the verse anchor if the part anchor isn't present.
+
+**Sectioned notes** add `verse-I`, `verse-I.3`, `verse-I.1:I.3`, `verse-I:II`, and similar forms — see [Verse sections](#verse-sections).
 
 ### Disjoint references (skip verses)
 
@@ -210,13 +281,15 @@ Enable **"Enable shorthand reference syntax"** in settings to also accept:
 | `[[File#3b:7]]`            | `[[File#verse-3b:7]]`                     |
 | `[[File#3:7c]]`            | `[[File#verse-3:7c]]`                     |
 
+Shorthand applies only to plain verse endpoints. Section forms (`verse-I`, `verse-I.3`, …) always use the explicit `verse-` prefix.
+
 > ⚠️ **Collision warning.** If the target note has a heading literally named `"3"`, `"3a"`, or `"3:7"`, the plugin will intercept the link instead of letting Obsidian navigate to that heading. That is why shorthand is off by default. The "Copy verse reference" commands always emit the explicit `verse-N` form regardless of this setting, so generated links stay collision-safe.
 
 ## Commands
 
 Available from the command palette (⌘/Ctrl + P):
 
-- **Copy verse reference** — finds the verse marker nearest your cursor and copies `[[CurrentFile#verse-N]]` to the clipboard (an authored part is preserved, e.g. `verse-5a`).
+- **Copy verse reference** — finds the verse marker nearest your cursor and copies `[[CurrentFile#verse-N]]` to the clipboard (nested and authored parts are preserved, e.g. `verse-I.3`, `verse-5a`).
 - **Copy verse range reference** — with a selection that spans two or more verse markers, copies `[[CurrentFile#verse-N:M]]`.
 
 Both commands always emit the explicit `verse-N` form.
@@ -248,6 +321,7 @@ obsidian://verse-markers?file=Notes/Gospel%20of%20John.md&verse=3&part=a
 | Max verses in hover preview               | 20      | Cap on how many verses the popover will quote.                      |
 | Enable shorthand reference syntax         | Off     | Also accept `[[File#3]]` / `[[File#3:7]]`. See collision warning.   |
 | Keep temporary highlight until click        | Off     | Navigation highlight auto-fades after ~2s; on = stays until click.  |
+| Show Roman parent in nested verses          | On      | In sectioned notes: nested labels use the section prefix (`I.1`); a section marker immediately before its first nested verse is hidden. Off = show the section marker and plain nested labels (`1`, `2`, …). A section with no nested verses always shows the section marker. |
 
 ## Styling
 
@@ -255,14 +329,22 @@ The plugin intentionally does **not** ship custom colors, weights, or sizes beyo
 
 ```css
 .verse-marker { color: var(--link-color); }              /* reading view + LP accents */
-.verse-marker-bracket { color: var(--text-faint); }      /* Live Preview: [//] brackets */
+.verse-marker-bracket { color: var(--text-faint); }      /* Live Preview: [//] / [///] brackets */
 .verse-hover-preview mark,
 .verse-embed mark { background-color: var(--text-highlight-bg); }  /* == in popovers/embeds */
 ```
 
-**Live Preview:** Obsidian's native handling of `[N]` (light-gray brackets, accent-colored digits) is left alone outside highlights. Inside `==highlight==`, verse digits get an accent-color decoration so they stay readable on the highlight background. `[//]` breaks are always decorated the same way (muted `[` `]`, accent `//`) because Obsidian does not style them natively.
+**Live Preview:** Obsidian's native handling of `[N]` (light-gray brackets, accent-colored digits) is left alone outside highlights. Section markers (`[I]`, …) and pause/break tokens (`[//]`, `[///]`) are always decorated explicitly (muted `[` `]`, accent label) because Obsidian does not style them natively.
 
-**Reading view:** verse labels render as accent-colored numbers (brackets dropped). `[//]` tokens are removed; editorial text around them stays.
+**Reading view:** verse labels render as accent-colored numbers (brackets dropped). `[//]` and `[///]` tokens are removed; editorial text and gap prose stay visible.
+
+### Highlights (`==text==`)
+
+The plugin treats `==highlight==` as first-class syntax, not a separate feature:
+
+- **Recognition** — verse markers inside a highlight follow the same boundary rules as elsewhere (`==[3]`, `**[3]**`, etc.).
+- **Live Preview** — verse digits inside a highlight get an accent-color decoration so they stay readable on the highlight background.
+- **Popovers & embeds** — `==text==` in an excerpt is converted to `<mark>` so it matches reading view. Unbalanced `==` at slice boundaries are closed automatically so formatting does not leak.
 
 If you want to restyle, drop overrides into a CSS snippet:
 
@@ -275,9 +357,10 @@ If you want to restyle, drop overrides into a CSS snippet:
 
 ## Behavior notes & edge cases
 
-- **Marker recognition is boundary-aware.** `[3]` works; `text[3]text` (no whitespace) does not. A marker inside a code block, inline code, or math is skipped entirely. Markers immediately after inline-format delimiters (`==[3]`, `**[3]**`, etc.) are recognized.
-- **Verse breaks are toggle-based.** `[//]` alternates verse/editorial zones; only editorial gaps are stripped from extraction. The token itself never appears in reading view.
-- **Highlights in excerpts.** Popovers and embeds convert `==text==` to `<mark>` so highlighted verse text matches reading view. Unbalanced `==` at slice boundaries are closed so excerpts don't leak formatting.
+- **Marker recognition is boundary-aware.** `[3]` works at line start, after `>`, after whitespace, or after inline-format delimiters; `text[3]text` (no whitespace) does not. A marker inside a code block, inline code, or math is skipped entirely.
+- **Editorial pauses are toggle-based.** `[//]` alternates citeable/editorial zones; only editorial gaps are stripped from extraction. Pause tokens never appear in reading view.
+- **Verse breaks (`[///]`).** Toggle-based in sectioned notes. Gap prose is stripped from citation. Resume with a second `[///]`, a section marker, or a top-level `[N]`. `[//]` inside a gap is a no-op until flow restarts.
+- **Section mode is automatic.** One section marker anywhere turns on nesting for verses under an active section. Verses before the first section stay plain `verse-N`.
 - **Skipped containers in reading view:** `<a>`, `<code>`, `<pre>`, `<math>`, `<mjx-container>`, `<table>`, `<img>`, and anything with `.math`, `.internal-embed`, or `.external-embed`.
 - **Verse uniqueness.** The plugin does not enforce unique verse *numbers* within a file. Repeating the same number with distinct part letters (`[5a]`, `[5b]`) is the intended way to author a scattered verse. Repeating a plain `[3]` with no part is not — for navigation the first one wins, though a whole-verse reference still gathers them all.
 - **Authored parts beat derived parts.** When a verse carries authored part letters, those are its parts; it is not *also* split by a heading or footnote inside a fragment.
@@ -309,9 +392,9 @@ npm run dev
 
 ```
 src/
-  detection.ts      Canonical verse regex, content extraction, fragment parsers, [//] breaks.
+  detection.ts      Canonical regex, section nesting, [//] / [///] tokens, content extraction.
   highlights.ts     ==highlight== range detection and HTML conversion for excerpts.
-  livePreview.ts    CM6 decorations for [N] inside highlights and [//] break styling.
+  livePreview.ts    CM6 decorations for [N] in highlights, section markers, [//] / [///].
   postprocessor.ts  Reading-view DOM rewrite + heading-split part anchor injection.
   references.ts     Link resolution, scroll-to-verse, range hover preview.
   embeds.ts         Native ![[File#verse-…]] embed rendering (reading + Live Preview).

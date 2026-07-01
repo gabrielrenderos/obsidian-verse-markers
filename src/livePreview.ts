@@ -5,9 +5,9 @@
  * livePreview.ts
  * Live Preview styling for verse markers and `[//]` breaks.
  *
- * `[N]` always gets explicit muted-bracket + accent-label marks (same look
- * everywhere in the editor). When ` [` (one space, then `[`) immediately
- * follows a closed marker — e.g. `[1] [^1]` — Obsidian would normally hide
+ * `[N]` and Roman section markers (`[I]`, …) always get explicit muted-bracket +
+ * accent-label marks. When ` [` (one space, then `[`) immediately follows a
+ * closed marker — e.g. `[1] [^1]` or `[I] [1]` — Obsidian would normally hide
  * the `[`/`]` of the marker (reference-link parse). Two display modes guard
  * that case, both ranked above Obsidian's decorations via Prec.highest:
  *   - caret outside: one replace widget covers the whole `[N]` token, so the
@@ -22,6 +22,7 @@
  * so the next decoration rebuild swaps in the editable form.
  *
  * `[//]` inside ==highlight== accents `//` only; outside, full bracket marks.
+ * `[///]` uses the same bracket styling as other break tokens.
  */
 
 import {
@@ -34,11 +35,8 @@ import {
 } from "@codemirror/view";
 import { Prec, RangeSetBuilder, EditorSelection, type StateEffect } from "@codemirror/state";
 import {
-  execVerseMarker,
-  findVerseBreakIndex,
-  getVerseRegex,
   isFollowedByFootnoteRef,
-  VERSE_BREAK_TOKEN,
+  nextProcessToken,
 } from "./detection";
 import { findHighlightRanges, type HighlightRange } from "./highlights";
 import {
@@ -246,11 +244,12 @@ function pushFootnoteEditingMarks(
   });
 }
 
-/** Muted `[` `]` + accent label — shared by `[N]` marks and `[//]`. */
+/** Muted `[` `]` + accent label — shared by `[N]` marks and break tokens. */
 function pushBracketLabelMarks(
   specs: Array<{ from: number; to: number; decoration: Decoration }>,
   tokenFrom: number,
-  tokenTo: number
+  tokenTo: number,
+  innerClass = "verse-marker"
 ): void {
   specs.push(
     {
@@ -261,7 +260,7 @@ function pushBracketLabelMarks(
     {
       from: tokenFrom + 1,
       to: tokenTo - 1,
-      decoration: Decoration.mark({ class: "verse-marker" }),
+      decoration: Decoration.mark({ class: innerClass }),
     },
     {
       from: tokenTo - 1,
@@ -269,6 +268,28 @@ function pushBracketLabelMarks(
       decoration: Decoration.mark({ class: "verse-marker-bracket" }),
     }
   );
+}
+
+/** Muted `[` `]` + accent label, or footnote-adjacent widget when ` [` follows. */
+function pushMarkerDecorations(
+  specs: Array<{ from: number; to: number; decoration: Decoration }>,
+  view: EditorView,
+  fullText: string,
+  matchFrom: number,
+  matchTo: number,
+  label: string
+): void {
+  const beforeFootnote = isFollowedByFootnoteRef(fullText, matchTo);
+  const touching =
+    beforeFootnote && selectionTouchesMarker(view, matchFrom, matchTo);
+
+  if (beforeFootnote && touching) {
+    pushFootnoteEditingMarks(specs, matchFrom, matchTo);
+  } else if (beforeFootnote) {
+    pushFootnoteWidgetMarks(specs, matchFrom, matchTo, label);
+  } else {
+    pushBracketLabelMarks(specs, matchFrom, matchTo);
+  }
 }
 
 function collectDecorationSpecs(
@@ -282,22 +303,18 @@ function collectDecorationSpecs(
   for (const { from, to } of view.visibleRanges) {
     let pos = from;
     while (pos < to) {
-      const slice = doc.sliceString(pos, to);
-      const brRel = findVerseBreakIndex(slice);
-      const markerRe = getVerseRegex();
-      const m = execVerseMarker(markerRe, slice);
-      const brIdx = brRel === -1 ? -1 : pos + brRel;
-      const markerIdx = m ? pos + m.index : -1;
+      const tok = nextProcessToken(fullText, pos, to);
+      if (!tok) break;
 
-      if (brIdx === -1 && markerIdx === -1) break;
-
-      if (markerIdx === -1 || (brIdx !== -1 && brIdx < markerIdx)) {
-        const breakFrom = brIdx;
-        const breakTo = brIdx + VERSE_BREAK_TOKEN.length;
+      if (tok.kind === "verseBreak" || tok.kind === "flowBreak") {
+        const breakFrom = tok.index;
+        const breakTo = tok.index + tok.length;
         if (markerInsideHighlight(breakFrom, breakTo, highlights)) {
+          const innerFrom = breakFrom + 1;
+          const innerTo = breakTo - 1;
           specs.push({
-            from: breakFrom + 1,
-            to: breakTo - 1,
+            from: innerFrom,
+            to: innerTo,
             decoration: Decoration.mark({ class: "verse-marker" }),
           });
         } else {
@@ -307,24 +324,19 @@ function collectDecorationSpecs(
         continue;
       }
 
-      const matchFrom = markerIdx;
-      const matchTo = markerIdx + m![0].length;
-      const beforeFootnote = isFollowedByFootnoteRef(fullText, matchTo);
-      const touching =
-        beforeFootnote && selectionTouchesMarker(view, matchFrom, matchTo);
-
-      if (beforeFootnote && touching) {
-        pushFootnoteEditingMarks(specs, matchFrom, matchTo);
-      } else if (beforeFootnote) {
-        pushFootnoteWidgetMarks(
-          specs,
-          matchFrom,
-          matchTo,
-          m![0].slice(1, -1)
-        );
-      } else {
-        pushBracketLabelMarks(specs, matchFrom, matchTo);
-      }
+      const raw = tok.raw;
+      const matchFrom = raw.index;
+      const matchTo = raw.index + raw.length;
+      const label =
+        raw.kind === "roman" ? raw.roman : raw.token.slice(1, -1);
+      pushMarkerDecorations(
+        specs,
+        view,
+        fullText,
+        matchFrom,
+        matchTo,
+        label
+      );
 
       pos = matchTo;
     }

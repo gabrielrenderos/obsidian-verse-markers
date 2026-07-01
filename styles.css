@@ -175,12 +175,6 @@
   margin-bottom: 0;
 }
 
-.verse-embed.verse-embed-empty .markdown-embed-content {
-  padding: 0.4em 0.7em;
-  color: var(--text-muted);
-  font-size: 0.9em;
-}
-
 /* Popover: hide the definition list while keeping inline refs hoverable. */
 .markdown-rendered.verse-hide-footnote-defs section.footnotes,
 .markdown-rendered.verse-hide-footnote-defs .footnotes,

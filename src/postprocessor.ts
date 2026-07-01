@@ -6,22 +6,70 @@
  * Reading view MarkdownPostProcessor for verse markers.
  */
 
-import { MarkdownPostProcessorContext } from "obsidian";
+import { App, MarkdownPostProcessorContext, MarkdownView } from "obsidian";
 import {
   charOffsetForLine,
-  execVerseMarker,
-  findVerseBreakIndex,
-  getVerseRegex,
   hasVerseMarker,
   isVerseBreakLine,
+  isSectionFlowBreakLine,
   parseMarkerToken,
   continuationPartAnchor,
-  VERSE_BREAK_TOKEN,
+  applyProcessToken,
+  nextProcessToken,
+  verseRefToAnchorId,
+  verseRefToDisplayLabel,
+  flatVerseRef,
+  shouldOmitLoneRomanMarker,
   VERSE_FRAGMENT_TEST_STRICT,
   VERSE_FRAGMENT_TEST_LOOSE,
   verseProcessStateAt,
+  defaultVerseProcessState,
   type VerseProcessState,
+  type ProcessToken,
 } from "./detection";
+
+type RomanDisplaySettings = Pick<
+  import("./settings").VerseMarkersSettings,
+  "showRomanParentInNestedVerses"
+>;
+
+let getRomanDisplaySettings: () => RomanDisplaySettings = () => ({
+  showRomanParentInNestedVerses: true,
+});
+
+/** Supplies hierarchical marker display options to the reading-view processor. */
+export function configureVerseMarkerDisplay(
+  getter: () => RomanDisplaySettings
+): void {
+  getRomanDisplaySettings = getter;
+}
+
+export function getShowRomanParentInNestedVerses(): boolean {
+  return getRomanDisplaySettings().showRomanParentInNestedVerses;
+}
+
+/** Re-run reading-view preview so marker labels pick up display setting changes. */
+export function refreshReadingViewVerseMarkers(app: App): void {
+  app.workspace.iterateAllLeaves((leaf) => {
+    if (!(leaf.view instanceof MarkdownView)) return;
+    const preview = leaf.view.previewMode;
+    if (!preview?.containerEl?.isConnected) return;
+
+    const scroll = preview.getScroll();
+    const data = preview.get();
+    // `rerender(false)` skips blocks that look unchanged; `set(…, true)` clears
+    // and re-renders from source so post-processors run on fresh `[N]` tokens.
+    preview.set(data, true);
+    preview.applyScroll(scroll);
+  });
+}
+
+interface MarkerRenderContext {
+  showRomanParentInNested: boolean;
+  sourceText?: string;
+  /** Absolute offset in `sourceText` at the start of the current text node. */
+  sourceOffset?: number;
+}
 
 /** Tags whose descendants must be skipped entirely. */
 const SKIP_TAGS = new Set([
@@ -64,6 +112,14 @@ function isInsideSkipped(node: Node, skipEmbeds = true): boolean {
   return false;
 }
 
+function isEditorialText(state: VerseProcessState): boolean {
+  return (
+    state.structuredFlowActive &&
+    (state.inVerseSpan || state.inSectionSpan) &&
+    !state.inVerseMode
+  );
+}
+
 /**
  * Appends plain text, wrapping editorial gaps in `.verse-editorial` so the
  * navigation flash can skip them without re-parsing source offsets.
@@ -74,7 +130,7 @@ function appendVerseText(
   state: VerseProcessState
 ): void {
   if (text.length === 0) return;
-  if (state.inVerseSpan && !state.inVerseMode) {
+  if (isEditorialText(state)) {
     const span = activeDocument.createElement("span");
     span.className = "verse-editorial";
     span.appendChild(activeDocument.createTextNode(text));
@@ -87,33 +143,66 @@ function appendVerseText(
 /**
  * Appends a styled verse marker to `fragment` (brackets dropped — reading view).
  */
-function appendVerseMarker(fragment: DocumentFragment, token: string): void {
+function appendVerseMarker(
+  fragment: DocumentFragment,
+  state: VerseProcessState,
+  token: string,
+  renderCtx: MarkerRenderContext,
+  markerIndex?: number
+): void {
+  if (token.startsWith("[") && /^[IVXLCDM]+$/.test(token.slice(1, -1))) {
+    const section = token.slice(1, -1);
+    if (
+      renderCtx.showRomanParentInNested &&
+      renderCtx.sourceText !== undefined &&
+      markerIndex !== undefined
+    ) {
+      const afterRoman =
+        (renderCtx.sourceOffset ?? 0) + markerIndex + token.length;
+      if (
+        shouldOmitLoneRomanMarker(
+          renderCtx.sourceText,
+          afterRoman,
+          section
+        )
+      ) {
+        return;
+      }
+    }
+    const ref = { section, number: null, part: null };
+    const markerEl = activeDocument.createElement("span");
+    markerEl.className = "verse-marker";
+    markerEl.id = verseRefToAnchorId(ref);
+    markerEl.textContent = section;
+    fragment.appendChild(markerEl);
+    return;
+  }
+
   const { number, part } = parseMarkerToken(token);
-  const label = `${number}${part ?? ""}`;
+  let ref = flatVerseRef(number, part);
+  if (
+    state.sawSection &&
+    state.currentSection !== null &&
+    state.structuredFlowActive &&
+    state.scopedChildrenActive
+  ) {
+    ref = { section: state.currentSection, number, part };
+  }
   const markerEl = activeDocument.createElement("span");
   markerEl.className = "verse-marker";
-  markerEl.id = `verse-${label}`;
-  markerEl.textContent = label;
+  markerEl.id = verseRefToAnchorId(ref);
+  markerEl.textContent = verseRefToDisplayLabel(
+    ref,
+    renderCtx.showRomanParentInNested
+  );
   fragment.appendChild(markerEl);
 }
 
-type InlineToken =
-  | { index: number; length: number; kind: "marker"; token: string }
-  | { index: number; length: number; kind: "break" };
+type InlineToken = ProcessToken;
 
-/** Next verse marker or `[//]` break in `text` at/after `from`. */
+/** Next verse/section marker, `[//]`, or `[///]` in `text` at/after `from`. */
 function nextInlineToken(text: string, from: number): InlineToken | null {
-  const slice = text.slice(from);
-  const brRel = findVerseBreakIndex(slice);
-  const brIdx = brRel === -1 ? -1 : from + brRel;
-  const m = execVerseMarker(getVerseRegex(), slice);
-  const markerIdx = m ? from + m.index : -1;
-
-  if (brIdx === -1 && markerIdx === -1) return null;
-  if (markerIdx === -1 || (brIdx !== -1 && brIdx < markerIdx)) {
-    return { index: brIdx, length: VERSE_BREAK_TOKEN.length, kind: "break" };
-  }
-  return { index: markerIdx, length: m![0].length, kind: "marker", token: m![0] };
+  return nextProcessToken(text, from);
 }
 
 /**
@@ -121,13 +210,17 @@ function nextInlineToken(text: string, from: number): InlineToken | null {
  * tokens (reading view), and wraps editorial gaps in `.verse-editorial`.
  * `state` carries the verse/editorial toggle across nodes in document order.
  */
-function processTextNode(textNode: Text, state: VerseProcessState): boolean {
+function processTextNode(
+  textNode: Text,
+  state: VerseProcessState,
+  renderCtx: MarkerRenderContext
+): boolean {
   if (textNode.parentElement?.closest(".verse-editorial, .verse-marker")) {
     return false;
   }
   const text = textNode.nodeValue ?? "";
   const hasToken = nextInlineToken(text, 0) !== null;
-  if (!hasToken && !(state.inVerseSpan && !state.inVerseMode)) return false;
+  if (!hasToken && !isEditorialText(state)) return false;
 
   const parent = textNode.parentNode;
   if (!parent) return false;
@@ -153,12 +246,13 @@ function processTextNode(textNode: Text, state: VerseProcessState): boolean {
     }
 
     if (hit.kind === "marker") {
-      appendVerseMarker(fragment, hit.token);
-      state.inVerseSpan = true;
-      state.inVerseMode = true;
-    } else if (state.inVerseSpan) {
-      state.inVerseMode = !state.inVerseMode;
+      const token =
+        hit.raw.kind === "roman"
+          ? `[${hit.raw.roman}]`
+          : hit.raw.token;
+      appendVerseMarker(fragment, state, token, renderCtx, hit.index);
     }
+    applyProcessToken(state, hit);
 
     lastIndex = hit.index + hit.length;
     pos = lastIndex;
@@ -181,10 +275,10 @@ function isEditorialContinuationBlock(
   state: VerseProcessState
 ): boolean {
   return (
-    state.inVerseSpan &&
-    !state.inVerseMode &&
+    isEditorialText(state) &&
     !hasVerseMarker(blockText) &&
-    !isVerseBreakLine(blockText)
+    !isVerseBreakLine(blockText) &&
+    !isSectionFlowBreakLine(blockText)
   );
 }
 
@@ -214,11 +308,37 @@ function collectTextNodes(el: HTMLElement, skipEmbeds = true): Text[] {
  * the `[N]` markers styled — so this variant doesn't skip embed containers.
  * Code/math and the hard tags are still skipped.
  */
-export function styleVerseMarkers(el: HTMLElement): void {
+export interface StyleVerseMarkersOptions {
+  /** Full note source — bootstraps Roman section scope for excerpt styling. */
+  fullText?: string;
+  /** Character offset in `fullText` where the excerpt begins. */
+  sourceStart?: number;
+  /** When set, overrides the plugin setting for Roman parent display. */
+  showRomanParentInNested?: boolean;
+}
+
+export function styleVerseMarkers(
+  el: HTMLElement,
+  options?: StyleVerseMarkersOptions
+): void {
   const textNodes = collectTextNodes(el, false);
-  const state: VerseProcessState = { inVerseSpan: false, inVerseMode: true };
+  const state: VerseProcessState =
+    options?.fullText !== undefined && options.sourceStart !== undefined
+      ? verseProcessStateAt(options.fullText, options.sourceStart)
+      : defaultVerseProcessState();
+  const renderCtx: MarkerRenderContext = {
+    showRomanParentInNested:
+      options?.showRomanParentInNested ??
+      getShowRomanParentInNestedVerses(),
+    sourceText: options?.fullText,
+    sourceOffset: options?.sourceStart,
+  };
+  let cursor = options?.sourceStart ?? 0;
   for (const tn of textNodes) {
-    processTextNode(tn, state);
+    const len = tn.nodeValue?.length ?? 0;
+    renderCtx.sourceOffset = cursor;
+    processTextNode(tn, state, renderCtx);
+    cursor += len;
   }
 }
 
@@ -292,7 +412,8 @@ function injectPartAnchor(el: HTMLElement, id: string): void {
 }
 
 /**
- * Hides a block whose source is only a verse-break line (`[//]`).
+ * Hides a block whose source is only a verse-break (`[//]`) or flow-break
+ * (`[///]`) line.
  */
 function hideVerseBreakBlock(
   el: HTMLElement,
@@ -304,7 +425,7 @@ function hideVerseBreakBlock(
     .split("\n")
     .slice(info.lineStart, info.lineEnd + 1)
     .join("\n");
-  if (!isVerseBreakLine(blockText)) return;
+  if (!isVerseBreakLine(blockText) && !isSectionFlowBreakLine(blockText)) return;
   el.addClass("verse-break");
   el.empty();
   el.setAttr("aria-hidden", "true");
@@ -322,17 +443,24 @@ export function versePostProcessor(
   el: HTMLElement,
   ctx?: MarkdownPostProcessorContext
 ): void {
-  let state: VerseProcessState = { inVerseSpan: false, inVerseMode: true };
+  // Popover/embed cards style markers themselves with full-file section context.
+  if (el.closest(".verse-hover-preview, .verse-embed-preview")) {
+    return;
+  }
+
+  let state: VerseProcessState = defaultVerseProcessState();
   let blockText = "";
+  let sectionInfo: ReturnType<MarkdownPostProcessorContext["getSectionInfo"]> =
+    null;
 
   if (ctx) {
-    const info = ctx.getSectionInfo(el);
-    if (info) {
-      const lines = info.text.split("\n");
-      blockText = lines.slice(info.lineStart, info.lineEnd + 1).join("\n");
+    sectionInfo = ctx.getSectionInfo(el);
+    if (sectionInfo) {
+      const lines = sectionInfo.text.split("\n");
+      blockText = lines.slice(sectionInfo.lineStart, sectionInfo.lineEnd + 1).join("\n");
       state = verseProcessStateAt(
-        info.text,
-        charOffsetForLine(info.text, info.lineStart)
+        sectionInfo.text,
+        charOffsetForLine(sectionInfo.text, sectionInfo.lineStart)
       );
     }
   }
@@ -345,9 +473,21 @@ export function versePostProcessor(
     return;
   }
 
+  const renderCtx: MarkerRenderContext = {
+    showRomanParentInNested: getShowRomanParentInNestedVerses(),
+    sourceText: sectionInfo?.text,
+    sourceOffset: sectionInfo
+      ? charOffsetForLine(sectionInfo.text, sectionInfo.lineStart)
+      : undefined,
+  };
+  let sourceCursor = renderCtx.sourceOffset ?? 0;
+
   const textNodes = collectTextNodes(el);
   for (const tn of textNodes) {
-    processTextNode(tn, state);
+    const len = tn.nodeValue?.length ?? 0;
+    renderCtx.sourceOffset = sourceCursor;
+    processTextNode(tn, state, renderCtx);
+    sourceCursor += len;
   }
 
   if (ctx) {

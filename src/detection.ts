@@ -81,9 +81,10 @@ export function execVerseMarker(
   return null;
 }
 
-/** True when `text` contains at least one boundary-valid verse marker. */
+/** True when `text` contains at least one boundary-valid verse or section marker. */
 export function hasVerseMarker(text: string): boolean {
-  return execVerseMarker(getVerseRegex(), text) !== null;
+  if (execVerseMarker(getVerseRegex(), text) !== null) return true;
+  return execRomanSectionMarker(getRomanSectionRegex(), text) !== null;
 }
 
 /**
@@ -105,34 +106,377 @@ function partToIndex(part: string): number {
   return part.charCodeAt(0) - "a".charCodeAt(0);
 }
 
-interface MarkerHit {
-  number: number;
-  part: string | null;
-  /** Offset of the opening "[". */
-  index: number;
-  /** Offset just past the closing "]". */
-  afterMarker: number;
+/* ---------------------------------------------------------------------------
+ * Hierarchical verses (Roman section markers + scoped children)
+ * ---------------------------------------------------------------------------
+ * When a note contains at least one Roman section marker ([I], [II], …),
+ * Arabic [N] markers after a section and before the next section are scoped
+ * children (I.1, II.3, …). [N] before the first section stays flat (verse-N).
+ * ------------------------------------------------------------------------- */
+
+/** Roman section marker: [I], [II], … — same boundary rules as [N]. */
+const ROMAN_SECTION_MARKER_REGEX = /\[([IVXLCDM]+)\](?=\s|$)/g;
+
+function getRomanSectionRegex(): RegExp {
+  return new RegExp(
+    ROMAN_SECTION_MARKER_REGEX.source,
+    ROMAN_SECTION_MARKER_REGEX.flags
+  );
+}
+
+function parseRomanNumeral(s: string): number {
+  const values: Record<string, number> = {
+    I: 1,
+    V: 5,
+    X: 10,
+    L: 50,
+    C: 100,
+    D: 500,
+    M: 1000,
+  };
+  let total = 0;
+  let prev = 0;
+  for (let i = s.length - 1; i >= 0; i--) {
+    const v = values[s[i]] ?? 0;
+    if (v < prev) total -= v;
+    else {
+      total += v;
+      prev = v;
+    }
+  }
+  return total;
+}
+
+function isValidRomanSection(s: string): boolean {
+  return /^[IVXLCDM]+$/.test(s) && parseRomanNumeral(s) > 0;
+}
+
+function execRomanSectionMarker(
+  re: RegExp,
+  text: string
+): RegExpExecArray | null {
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (atVerseBoundary(text, m.index) && isValidRomanSection(m[1])) {
+      return m;
+    }
+  }
+  return null;
 }
 
 /**
- * Scans every verse marker in `text` in document order, returning its number,
- * authored part (or null), and source offsets. The single low-level primitive
- * the higher-level span/fragment/range helpers build on.
+ * A verse address: flat `3` / `3a`, section-only `I`, or scoped child `I.3` /
+ * `I.3a`. `number: null` means a section-only reference (verse-I).
+ */
+export interface VerseRef {
+  section: string | null;
+  number: number | null;
+  part: string | null;
+}
+
+export type MarkerKind = "flat" | "section" | "child";
+
+export interface MarkerHit {
+  kind: MarkerKind;
+  /** Roman section id for section/child hits; null for flat. */
+  section: string | null;
+  number: number;
+  part: string | null;
+  index: number;
+  afterMarker: number;
+}
+
+export type RawMarkerToken =
+  | { kind: "roman"; index: number; length: number; roman: string }
+  | { kind: "numeric"; index: number; length: number; token: string };
+
+export function nextRawMarkerToken(text: string, from: number): RawMarkerToken | null {
+  const slice = text.slice(from);
+  const numM = execVerseMarker(getVerseRegex(), slice);
+  const numIdx = numM ? from + numM.index : -1;
+
+  const romM = execRomanSectionMarker(getRomanSectionRegex(), slice);
+  const romIdx = romM ? from + romM.index : -1;
+
+  if (numIdx === -1 && romIdx === -1) return null;
+  if (numIdx === -1 || (romIdx !== -1 && romIdx < numIdx)) {
+    return {
+      kind: "roman",
+      index: romIdx,
+      length: romM![0].length,
+      roman: romM![1],
+    };
+  }
+  return {
+    kind: "numeric",
+    index: numIdx,
+    length: numM![0].length,
+    token: numM![0],
+  };
+}
+
+/**
+ * Scans every verse marker in `text` in document order. Auto-detects hierarchy
+ * when any Roman section marker is present (no extra pass). Respects `[///]`
+ * structured-flow breaks after the first Roman marker.
  */
 function scanMarkers(text: string): MarkerHit[] {
-  const re = getVerseRegex();
   const hits: MarkerHit[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = execVerseMarker(re, text)) !== null) {
-    const { number, part } = parseMarkerToken(m[0]);
-    hits.push({
-      number,
-      part,
-      index: m.index,
-      afterMarker: m.index + m[0].length,
-    });
+  let pos = 0;
+  let currentSection: string | null = null;
+  let sawSection = false;
+  let structuredFlowActive = true;
+  let scopedChildrenActive = false;
+  let resumableScopedChildren = false;
+
+  while (pos < text.length) {
+    const tok = nextProcessToken(text, pos);
+    if (!tok) break;
+
+    if (tok.kind === "flowBreak") {
+      if (sawSection) {
+        if (structuredFlowActive) {
+          resumableScopedChildren = scopedChildrenActive;
+          structuredFlowActive = false;
+          scopedChildrenActive = false;
+        } else {
+          structuredFlowActive = true;
+          scopedChildrenActive = resumableScopedChildren;
+        }
+      }
+      pos = tok.index + tok.length;
+      continue;
+    }
+
+    if (tok.kind === "verseBreak") {
+      pos = tok.index + tok.length;
+      continue;
+    }
+
+    const raw = tok.raw;
+    if (raw.kind === "roman") {
+      sawSection = true;
+      currentSection = raw.roman;
+      structuredFlowActive = true;
+      scopedChildrenActive = true;
+      hits.push({
+        kind: "section",
+        section: raw.roman,
+        number: 0,
+        part: null,
+        index: raw.index,
+        afterMarker: raw.index + raw.length,
+      });
+    } else {
+      const { number, part } = parseMarkerToken(raw.token);
+      if (!structuredFlowActive) {
+        structuredFlowActive = true;
+        scopedChildrenActive = false;
+      }
+      if (sawSection && currentSection !== null && scopedChildrenActive) {
+        hits.push({
+          kind: "child",
+          section: currentSection,
+          number,
+          part,
+          index: raw.index,
+          afterMarker: raw.index + raw.length,
+        });
+      } else {
+        hits.push({
+          kind: "flat",
+          section: null,
+          number,
+          part,
+          index: raw.index,
+          afterMarker: raw.index + raw.length,
+        });
+      }
+    }
+    pos = tok.index + tok.length;
   }
   return hits;
+}
+
+export function verseRefIsFlat(ref: VerseRef): boolean {
+  return ref.section === null && ref.number !== null;
+}
+
+export function verseRefsEqual(a: VerseRef, b: VerseRef): boolean {
+  return (
+    a.section === b.section &&
+    a.number === b.number &&
+    a.part === b.part
+  );
+}
+
+/** Link fragment label after `verse-` (e.g. `3`, `I`, `I.3`, `I.3a`). */
+export function verseRefToLabel(ref: VerseRef): string {
+  if (ref.section !== null && ref.number === null) return ref.section;
+  const base =
+    ref.section !== null ? `${ref.section}.${ref.number}` : `${ref.number}`;
+  return ref.part ? `${base}${ref.part}` : base;
+}
+
+/**
+ * Reading-view / popover / embed label for a verse ref. Anchor ids always use
+ * {@link verseRefToLabel}; this controls whether scoped children include the
+ * Roman parent and whether lone Roman markers are omitted at render time.
+ */
+export function verseRefToDisplayLabel(
+  ref: VerseRef,
+  showRomanParentInNested: boolean
+): string {
+  if (ref.section !== null && ref.number === null) return ref.section;
+  if (
+    ref.section !== null &&
+    ref.number !== null &&
+    !showRomanParentInNested
+  ) {
+    return ref.part ? `${ref.number}${ref.part}` : `${ref.number}`;
+  }
+  return verseRefToLabel(ref);
+}
+
+/**
+ * True when a Roman marker at `afterRoman` should not be rendered because the
+ * next marker is a scoped child of the same section with only whitespace between.
+ */
+export function shouldOmitLoneRomanMarker(
+  text: string,
+  afterRoman: number,
+  romanSection: string
+): boolean {
+  const tok = nextProcessToken(text, afterRoman);
+  if (!tok || tok.kind !== "marker" || tok.raw.kind !== "numeric") return false;
+  const between = text.slice(afterRoman, tok.index);
+  if (!/^\s*$/.test(between)) return false;
+  const state = verseProcessStateAt(text, afterRoman);
+  if (
+    !state.scopedChildrenActive ||
+    state.currentSection !== romanSection
+  ) {
+    return false;
+  }
+  const probe = { ...state };
+  applyProcessToken(probe, tok);
+  return (
+    probe.openVerseRef?.section === romanSection &&
+    probe.openVerseRef?.number !== null
+  );
+}
+
+/** DOM / navigation id (e.g. `verse-3`, `verse-I`, `verse-I.3`). */
+export function verseRefToAnchorId(ref: VerseRef): string {
+  return `verse-${verseRefToLabel(ref)}`;
+}
+
+export function flatVerseRef(
+  number: number,
+  part: string | null = null
+): VerseRef {
+  return { section: null, number, part };
+}
+
+export function hitToRef(hit: MarkerHit): VerseRef | null {
+  if (hit.kind === "section") {
+    return { section: hit.section, number: null, part: null };
+  }
+  if (hit.kind === "child") {
+    return {
+      section: hit.section,
+      number: hit.number,
+      part: hit.part,
+    };
+  }
+  return { section: null, number: hit.number, part: hit.part };
+}
+
+function refMatchesHit(ref: VerseRef, hit: MarkerHit): boolean {
+  if (ref.number === null) {
+    return hit.kind === "section" && hit.section === ref.section;
+  }
+  if (ref.section === null) {
+    if (hit.kind !== "flat" || hit.number !== ref.number) return false;
+    return ref.part === null || hit.part === ref.part;
+  }
+  if (hit.kind !== "child") return false;
+  if (hit.section !== ref.section || hit.number !== ref.number) return false;
+  return ref.part === null || hit.part === ref.part;
+}
+
+function findHitForRef(hits: MarkerHit[], ref: VerseRef): number {
+  return hits.findIndex((h) => refMatchesHit(ref, h));
+}
+
+/** Parses one endpoint: `3`, `3a`, `I`, `I.3`, `I.3a`. */
+export function parseVerseRefEndpoint(endpoint: string): VerseRef | null {
+  const child = /^([IVXLCDM]+)\.(\d+)([a-z]*)$/.exec(endpoint);
+  if (child && isValidRomanSection(child[1])) {
+    return {
+      section: child[1],
+      number: parseInt(child[2], 10),
+      part: child[3] === "" ? null : child[3],
+    };
+  }
+  const section = /^([IVXLCDM]+)$/.exec(endpoint);
+  if (section && isValidRomanSection(section[1])) {
+    return { section: section[1], number: null, part: null };
+  }
+  const flat = /^(\d+)([a-z]*)$/.exec(endpoint);
+  if (flat) {
+    return {
+      section: null,
+      number: parseInt(flat[1], 10),
+      part: flat[2] === "" ? null : flat[2],
+    };
+  }
+  return null;
+}
+
+function isCitableHit(hit: MarkerHit): boolean {
+  return hit.kind === "flat" || hit.kind === "child";
+}
+
+/** Index of the last child (or section if no children) belonging to `section`. */
+function lastHitIndexInSection(hits: MarkerHit[], section: string): number {
+  let last = -1;
+  for (let i = 0; i < hits.length; i++) {
+    if (hits[i].kind === "section" && hits[i].section === section) {
+      last = i;
+    } else if (hits[i].kind === "child" && hits[i].section === section) {
+      last = i;
+    }
+  }
+  return last;
+}
+
+function rangeStartHitIndex(hits: MarkerHit[], ref: VerseRef): number {
+  if (ref.number === null) {
+    return hits.findIndex(
+      (h) => h.kind === "section" && h.section === ref.section
+    );
+  }
+  return findHitForRef(hits, ref);
+}
+
+function rangeEndHitIndex(hits: MarkerHit[], ref: VerseRef): number {
+  if (ref.number === null) {
+    return lastHitIndexInSection(hits, ref.section!);
+  }
+  return findHitForRef(hits, ref);
+}
+
+function contentEndBeforeNextHit(
+  text: string,
+  hits: MarkerHit[],
+  hitIndex: number
+): number {
+  const nextIdx = hitIndex + 1;
+  if (nextIdx < hits.length) {
+    return lineLeadStart(text, hits[nextIdx].index);
+  }
+  return text.length;
 }
 
 /* ---------------------------------------------------------------------------
@@ -157,6 +501,10 @@ function scanMarkers(text: string): MarkerHit[] {
  * A verse-break `[//]` (on its own line or inline) toggles between verse text
  * and editorial asides. Odd gaps (after 1st, 3rd, … break) are excluded; even
  * gaps (after 2nd, 4th, …) are verse again until the next `[N]` marker.
+ *
+ * A structured-flow break `[///]` (after the first Roman marker) toggles
+ * between hierarchical citation and outside-flow plain text. While off, `[N]`
+ * markers are flat; a Roman marker or `[///]` resume restores scoped children.
  * ------------------------------------------------------------------------- */
 
 /** ATX-style heading line: optional indent, 1–6 `#`, at least one non-space char after. */
@@ -165,18 +513,52 @@ const HEADING_LINE_REGEX = /^\s*#{1,6}\s+\S.*$/;
 /** Literal verse-break token (inline or on its own line). */
 export const VERSE_BREAK_TOKEN = "[//]";
 
+/** Structured-flow break — exits Roman + nested verse flow until resumed. */
+export const SECTION_FLOW_BREAK_TOKEN = "[///]";
+
+function isEscapedToken(text: string, index: number): boolean {
+  return index > 0 && text[index - 1] === "\\";
+}
+
 /**
  * Index of the first `[//]` in `text` at or after `from`, or -1. Ignores a
- * backslash escape immediately before the token. Works inline (e.g.
- * `[5] verse[//] note[//] more verse`) as well as on a dedicated line.
+ * backslash escape immediately before the token and does not match the prefix
+ * of `[///]`.
  */
-export function findVerseBreakIndex(text: string, from = 0): number {
+export function findVerseBreakIndex(
+  text: string,
+  from = 0,
+  limit = text.length
+): number {
   let pos = from;
-  while (pos < text.length) {
+  while (pos < limit) {
     const idx = text.indexOf(VERSE_BREAK_TOKEN, pos);
-    if (idx === -1) return -1;
-    if (idx > 0 && text[idx - 1] === "\\") {
+    if (idx === -1 || idx >= limit) return -1;
+    if (isEscapedToken(text, idx)) {
       pos = idx + VERSE_BREAK_TOKEN.length;
+      continue;
+    }
+    if (text.slice(idx, idx + SECTION_FLOW_BREAK_TOKEN.length) === SECTION_FLOW_BREAK_TOKEN) {
+      pos = idx + 1;
+      continue;
+    }
+    return idx;
+  }
+  return -1;
+}
+
+/** Index of the first `[///]` in `text` at or after `from`, or -1. */
+export function findSectionFlowBreakIndex(
+  text: string,
+  from = 0,
+  limit = text.length
+): number {
+  let pos = from;
+  while (pos < limit) {
+    const idx = text.indexOf(SECTION_FLOW_BREAK_TOKEN, pos);
+    if (idx === -1 || idx >= limit) return -1;
+    if (isEscapedToken(text, idx)) {
+      pos = idx + SECTION_FLOW_BREAK_TOKEN.length;
       continue;
     }
     return idx;
@@ -192,10 +574,199 @@ export function isVerseBreakLine(line: string): boolean {
   return /^\s*(?:>\s?)*\[\/\/\]\s*$/.test(line);
 }
 
-/** Reading-view / flash state after `[N]` and `[//]` tokens in source order. */
+/** True when `line` is only `[///]` (optional blockquote / indent). */
+export function isSectionFlowBreakLine(line: string): boolean {
+  return /^\s*(?:>\s?)*\[\/\/\/\]\s*$/.test(line);
+}
+
+export type ProcessToken =
+  | { kind: "marker"; index: number; length: number; raw: RawMarkerToken }
+  | { kind: "verseBreak"; index: number; length: number }
+  | { kind: "flowBreak"; index: number; length: number };
+
+/** Next verse/section marker, `[//]`, or `[///]` in document order. */
+export function nextProcessToken(
+  text: string,
+  from: number,
+  limit = text.length
+): ProcessToken | null {
+  const flowRel = findSectionFlowBreakIndex(text, from, limit);
+  const flowIdx = flowRel === -1 ? -1 : flowRel;
+  const brIdx = findVerseBreakIndex(text, from, limit);
+  const raw = nextRawMarkerToken(text, from);
+  const markerIdx = raw && raw.index < limit ? raw.index : -1;
+
+  let bestIdx = -1;
+  let best: ProcessToken | null = null;
+
+  if (flowIdx !== -1 && (bestIdx === -1 || flowIdx < bestIdx)) {
+    bestIdx = flowIdx;
+    best = {
+      kind: "flowBreak",
+      index: flowIdx,
+      length: SECTION_FLOW_BREAK_TOKEN.length,
+    };
+  }
+  if (brIdx !== -1 && (bestIdx === -1 || brIdx < bestIdx)) {
+    bestIdx = brIdx;
+    best = {
+      kind: "verseBreak",
+      index: brIdx,
+      length: VERSE_BREAK_TOKEN.length,
+    };
+  }
+  if (markerIdx !== -1 && (bestIdx === -1 || markerIdx < bestIdx) && raw) {
+    best = {
+      kind: "marker",
+      index: markerIdx,
+      length: raw.length,
+      raw,
+    };
+  }
+  return best;
+}
+
+/** Reading-view / flash state after markers, `[//]`, and `[///]` in source order. */
 export interface VerseProcessState {
   inVerseSpan: boolean;
   inVerseMode: boolean;
+  /** Roman section prose span is open (after `[I]`, before next `[II]`). */
+  inSectionSpan: boolean;
+  /** False in outside-flow gaps opened by `[///]`. */
+  structuredFlowActive: boolean;
+  /** When true, `[N]` after `[I]` classify as scoped children. */
+  scopedChildrenActive: boolean;
+  /** Active Roman section when hierarchy is in use. */
+  currentSection: string | null;
+  sawSection: boolean;
+  /** Open citable unit before a `[///]` off toggle (for resume). */
+  resumableRef: VerseRef | null;
+  /** Current open verse address while structured flow is active. */
+  openVerseRef: VerseRef | null;
+}
+
+export function defaultVerseProcessState(): VerseProcessState {
+  return {
+    inVerseSpan: false,
+    inVerseMode: true,
+    inSectionSpan: false,
+    structuredFlowActive: true,
+    scopedChildrenActive: false,
+    currentSection: null,
+    sawSection: false,
+    resumableRef: null,
+    openVerseRef: null,
+  };
+}
+
+function currentResumableRef(state: VerseProcessState): VerseRef | null {
+  if (state.openVerseRef) return { ...state.openVerseRef };
+  if (state.inSectionSpan && state.currentSection) {
+    return { section: state.currentSection, number: null, part: null };
+  }
+  return null;
+}
+
+function restoreResumableRef(state: VerseProcessState): void {
+  const ref = state.resumableRef;
+  if (!ref) {
+    state.inVerseSpan = false;
+    state.inSectionSpan = false;
+    state.inVerseMode = true;
+    state.openVerseRef = null;
+    state.scopedChildrenActive = false;
+    return;
+  }
+  if (ref.number === null && ref.section) {
+    state.currentSection = ref.section;
+    state.sawSection = true;
+    state.inSectionSpan = true;
+    state.inVerseSpan = false;
+    state.scopedChildrenActive = true;
+    state.openVerseRef = null;
+  } else if (ref.section) {
+    state.currentSection = ref.section;
+    state.sawSection = true;
+    state.inSectionSpan = true;
+    state.inVerseSpan = true;
+    state.scopedChildrenActive = true;
+    state.openVerseRef = { ...ref };
+  } else {
+    state.inSectionSpan = false;
+    state.inVerseSpan = true;
+    state.scopedChildrenActive = false;
+    state.openVerseRef = { ...ref };
+  }
+  state.inVerseMode = true;
+}
+
+/** Applies one scanned process token to `state` (mutates in place). */
+export function applyProcessToken(
+  state: VerseProcessState,
+  tok: ProcessToken
+): void {
+  if (tok.kind === "flowBreak") {
+    if (!state.sawSection) return;
+    if (state.structuredFlowActive) {
+      state.resumableRef = currentResumableRef(state);
+      state.structuredFlowActive = false;
+      state.scopedChildrenActive = false;
+      state.inVerseSpan = false;
+      state.inSectionSpan = false;
+      state.inVerseMode = true;
+      state.openVerseRef = null;
+    } else {
+      state.structuredFlowActive = true;
+      restoreResumableRef(state);
+      state.resumableRef = null;
+    }
+    return;
+  }
+
+  if (tok.kind === "verseBreak") {
+    if (
+      state.structuredFlowActive &&
+      (state.inVerseSpan || state.inSectionSpan)
+    ) {
+      state.inVerseMode = !state.inVerseMode;
+    }
+    return;
+  }
+
+  if (tok.kind !== "marker") return;
+  const raw = tok.raw;
+
+  if (raw.kind === "roman") {
+    state.sawSection = true;
+    state.currentSection = raw.roman;
+    state.inSectionSpan = true;
+    state.inVerseSpan = false;
+    state.inVerseMode = true;
+    state.structuredFlowActive = true;
+    state.scopedChildrenActive = true;
+    state.openVerseRef = null;
+    state.resumableRef = null;
+    return;
+  }
+
+  const { number, part } = parseMarkerToken(raw.token);
+  if (!state.structuredFlowActive) {
+    state.structuredFlowActive = true;
+    state.scopedChildrenActive = false;
+  }
+  state.inVerseSpan = true;
+  state.inVerseMode = true;
+  if (state.sawSection && state.currentSection && state.scopedChildrenActive) {
+    state.inSectionSpan = true;
+    state.openVerseRef = {
+      section: state.currentSection,
+      number,
+      part,
+    };
+  } else {
+    state.inSectionSpan = false;
+    state.openVerseRef = flatVerseRef(number, part);
+  }
 }
 
 /** Character offset at the start of `lineIndex` (0-based) in `text`. */
@@ -210,10 +781,11 @@ export function charOffsetForLine(text: string, lineIndex: number): number {
 }
 
 /**
- * True when a closed verse marker at `markerEnd` is immediately followed by
- * exactly one space and an opening bracket (` [`). The Live Preview replace
- * widget is applied only in that case — not for other spaces, brackets, or
- * partial footnote tokens alone.
+ * True when a closed marker at `markerEnd` is immediately followed by exactly
+ * one space and an opening bracket (` [`). Obsidian's reference-link parse
+ * hides the first marker's brackets in that case — e.g. `[1] [^1]` or
+ * `[I] [1]`. The Live Preview replace widget guards both numeric and Roman
+ * section markers.
  */
 export function isFollowedByFootnoteRef(
   text: string,
@@ -230,26 +802,14 @@ export function verseProcessStateAt(
   text: string,
   endOffset: number
 ): VerseProcessState {
-  const state: VerseProcessState = { inVerseSpan: false, inVerseMode: true };
+  const state = defaultVerseProcessState();
   let pos = 0;
   const limit = Math.min(endOffset, text.length);
   while (pos < limit) {
-    const slice = text.slice(pos, limit);
-    const brRel = findVerseBreakIndex(slice);
-    const brIdx = brRel === -1 ? -1 : pos + brRel;
-    const m = execVerseMarker(getVerseRegex(), slice);
-    const markerIdx = m ? pos + m.index : -1;
-
-    if (brIdx === -1 && markerIdx === -1) break;
-
-    if (markerIdx === -1 || (brIdx !== -1 && brIdx < markerIdx)) {
-      if (state.inVerseSpan) state.inVerseMode = !state.inVerseMode;
-      pos = brIdx + VERSE_BREAK_TOKEN.length;
-    } else {
-      state.inVerseSpan = true;
-      state.inVerseMode = true;
-      pos = markerIdx + m![0].length;
-    }
+    const tok = nextProcessToken(text, pos, limit);
+    if (!tok) break;
+    applyProcessToken(state, tok);
+    pos = tok.index + tok.length;
   }
   return state;
 }
@@ -257,6 +817,34 @@ export function verseProcessStateAt(
 /** Strips one level of leading "> " blockquote marker from a line. */
 function stripBlockquoteMarker(line: string): string {
   return line.replace(/^\s*>\s?/, "");
+}
+
+/**
+ * Drops outside-flow spans between `[///]` toggles. No-op on `[///]` before the
+ * first Roman marker in `raw`.
+ */
+function stripStructuredFlowGaps(raw: string): string {
+  const parts: string[] = [];
+  let inStructured = true;
+  let sawSection = false;
+  let pos = 0;
+  while (pos < raw.length) {
+    const tok = nextProcessToken(raw, pos);
+    if (!tok) {
+      if (inStructured) parts.push(raw.slice(pos));
+      break;
+    }
+    if (tok.index > pos && inStructured) {
+      parts.push(raw.slice(pos, tok.index));
+    }
+    if (tok.kind === "flowBreak") {
+      if (sawSection) inStructured = !inStructured;
+    } else if (tok.kind === "marker" && tok.raw.kind === "roman") {
+      sawSection = true;
+    }
+    pos = tok.index + tok.length;
+  }
+  return parts.join("");
 }
 
 /**
@@ -278,6 +866,11 @@ function stripEditorialBreaks(raw: string): string {
     pos = br + VERSE_BREAK_TOKEN.length;
   }
   return parts.join("");
+}
+
+/** Removes `[///]` outside-flow gaps, then `[//]` editorial gaps. */
+export function stripCitationGaps(raw: string): string {
+  return stripEditorialBreaks(stripStructuredFlowGaps(raw));
 }
 
 /**
@@ -429,8 +1022,23 @@ function splitVerseParts(rawContent: string): string[] {
   return versePartSegments(rawContent).flat();
 }
 
+function findVerseSpanByRef(
+  text: string,
+  ref: VerseRef
+): { start: number; end: number } | null {
+  const hits = scanMarkers(text);
+  const idx = findHitForRef(hits, ref);
+  if (idx === -1) return null;
+  const hit = hits[idx];
+  if (!isCitableHit(hit)) return null;
+  if (text[hit.afterMarker] !== " ") return null;
+  const spanStart = hit.afterMarker + 1;
+  const spanEnd = idx + 1 < hits.length ? hits[idx + 1].index : text.length;
+  return { start: spanStart, end: spanEnd };
+}
+
 /**
- * Locates a verse's content span in the text.
+ * Locates a flat verse's content span in the text.
  * Returns null if the verse is not found, or if the marker is not followed
  * by a single space (malformed marker).
  */
@@ -438,25 +1046,7 @@ function findVerseSpan(
   text: string,
   verseNumber: number
 ): { start: number; end: number } | null {
-  const re = getVerseRegex();
-  let spanStart = -1;
-  let spanEnd = text.length;
-  let match: RegExpExecArray | null;
-
-  while ((match = execVerseMarker(re, text)) !== null) {
-    const num = parseMarkerToken(match[0]).number;
-    const afterMarker = match.index + match[0].length;
-    if (spanStart === -1 && num === verseNumber) {
-      if (text[afterMarker] !== " ") return null;
-      spanStart = afterMarker + 1;
-    } else if (spanStart !== -1) {
-      spanEnd = match.index;
-      break;
-    }
-  }
-
-  if (spanStart === -1) return null;
-  return { start: spanStart, end: spanEnd };
+  return findVerseSpanByRef(text, flatVerseRef(verseNumber));
 }
 
 /**
@@ -553,9 +1143,16 @@ function trimTrailingWhitespaceRange(
 }
 
 function verseNumberAtMarker(text: string, offset: number): number | null {
-  const m = execVerseMarker(getVerseRegex(), text.slice(offset));
+  const slice = text.slice(offset);
+  const m = execVerseMarker(getVerseRegex(), slice);
   if (!m || m.index !== 0) return null;
   return parseMarkerToken(m[0]).number;
+}
+
+function hitInNumericRange(hit: MarkerHit, start: number, end: number): boolean {
+  if (!isCitableHit(hit)) return false;
+  if (hit.kind === "child") return false;
+  return hit.number >= start && hit.number <= end;
 }
 
 /** True when no verse body text remains between `afterLine` and `before`. */
@@ -603,46 +1200,26 @@ function trailingHeadingStartInSpan(
  * stops at footnotes always and at trailing headings when the next verse is not
  * in the reference.
  */
-function flashSpanEndForVerse(
-  text: string,
-  span: { start: number; end: number },
-  inRange: Set<number>
-): number {
-  let end = span.end;
-
-  const nextInSelection =
-    end < text.length &&
-    (() => {
-      const nextNum = verseNumberAtMarker(text, end);
-      return nextNum !== null && inRange.has(nextNum);
-    })();
-
-  if (!nextInSelection) {
-    const heading = trailingHeadingStartInSpan(text, span.start, end);
-    if (heading !== null) end = heading;
-  }
-
-  const footStart = footnoteDefinitionsBlockStart(text, span.start);
-  if (footStart !== null && footStart < end) end = footStart;
-
-  return end;
-}
-
-/**
- * Source offsets of the `[N]` marker token for `verseNumber`, or null.
- */
 function markerTokenRangeForVerse(
   text: string,
   verseNumber: number
 ): { from: number; to: number } | null {
-  const re = getVerseRegex();
-  let m: RegExpExecArray | null;
-  while ((m = execVerseMarker(re, text)) !== null) {
-    if (parseMarkerToken(m[0]).number === verseNumber) {
-      return { from: m.index, to: m.index + m[0].length };
-    }
-  }
-  return null;
+  const hits = scanMarkers(text);
+  const idx = hits.findIndex(
+    (h) => h.kind === "flat" && h.number === verseNumber
+  );
+  if (idx === -1) return null;
+  return { from: hits[idx].index, to: hits[idx].afterMarker };
+}
+
+function markerTokenRangeForRef(
+  text: string,
+  ref: VerseRef
+): { from: number; to: number } | null {
+  const hits = scanMarkers(text);
+  const idx = findHitForRef(hits, ref);
+  if (idx === -1 || !isCitableHit(hits[idx])) return null;
+  return { from: hits[idx].index, to: hits[idx].afterMarker };
 }
 
 /** One contiguous highlighted run (disjoint segments produce separate runs). */
@@ -656,22 +1233,28 @@ export function getVerseFlashRuns(
   text: string,
   segments: VerseSegment[]
 ): VerseFlashRun[] {
-  const inRange = new Set<number>();
-  for (const seg of segments) {
-    for (let n = seg.start; n <= seg.end; n++) inRange.add(n);
-  }
-
+  const hits = scanMarkers(text);
   const runs: VerseFlashRun[] = [];
+
   for (const seg of segments) {
+    const startIdx = rangeStartHitIndex(hits, seg.start);
+    const endIdx = rangeEndHitIndex(hits, seg.end);
+    if (startIdx === -1 || endIdx === -1 || startIdx > endIdx) continue;
+
     const parts: Array<{ from: number; to: number }> = [];
-    for (let n = seg.start; n <= seg.end; n++) {
-      const span = findVerseSpan(text, n);
+    for (let i = startIdx; i <= endIdx; i++) {
+      if (!isCitableHit(hits[i])) continue;
+      const ref = hitToRef(hits[i]);
+      if (!ref || ref.number === null) continue;
+
+      const span = findVerseSpanByRef(text, ref);
       if (!span) continue;
-      const marker = markerTokenRangeForVerse(text, n);
+      const marker = markerTokenRangeForRef(text, ref);
       const flashFrom = marker?.from ?? span.start;
-      const spanEnd = flashSpanEndForVerse(text, span, inRange);
+      const spanEnd = flashSpanEndForVerseRef(text, span, hits, i, seg);
       parts.push(...verseModeSourceIntervals(text, flashFrom, spanEnd));
     }
+
     const ranges = mergeAdjacentSourceRanges(parts);
     if (ranges.length === 0) continue;
     const lastIdx = ranges.length - 1;
@@ -685,6 +1268,31 @@ export function getVerseFlashRuns(
     runs.push({ ranges, capStart: true, capEnd: true });
   }
   return runs;
+}
+
+function flashSpanEndForVerseRef(
+  text: string,
+  span: { start: number; end: number },
+  hits: MarkerHit[],
+  hitIndex: number,
+  seg: VerseSegment
+): number {
+  const endIdx = rangeEndHitIndex(hits, seg.end);
+  const nextInSelection =
+    hitIndex + 1 <= endIdx &&
+    isCitableHit(hits[hitIndex + 1]) &&
+    hitIndex + 1 <= endIdx;
+
+  let end = span.end;
+  if (!nextInSelection) {
+    const heading = trailingHeadingStartInSpan(text, span.start, end);
+    if (heading !== null) end = heading;
+  }
+
+  const footStart = footnoteDefinitionsBlockStart(text, span.start);
+  if (footStart !== null && footStart < end) end = footStart;
+
+  return end;
 }
 
 /**
@@ -711,7 +1319,7 @@ export function getVerseParts(
   const span = findVerseSpan(text, verseNumber);
   if (!span) return null;
   return splitVerseParts(
-    stripEditorialBreaks(text.slice(span.start, span.end))
+    stripCitationGaps(text.slice(span.start, span.end))
   );
 }
 
@@ -743,11 +1351,19 @@ export function getVerseFragments(
   text: string,
   verseNumber: number
 ): VerseFragment[] {
+  return getVerseFragmentsByRef(text, flatVerseRef(verseNumber));
+}
+
+export function getVerseFragmentsByRef(
+  text: string,
+  ref: VerseRef
+): VerseFragment[] {
   const hits = scanMarkers(text);
   const fragments: VerseFragment[] = [];
   for (let i = 0; i < hits.length; i++) {
-    if (hits[i].number !== verseNumber) continue;
-    if (text[hits[i].afterMarker] !== " ") continue; // malformed marker
+    if (!refMatchesHit(ref, hits[i])) continue;
+    if (!isCitableHit(hits[i])) continue;
+    if (text[hits[i].afterMarker] !== " ") continue;
     const contentStart = hits[i].afterMarker + 1;
     const hardEnd = i + 1 < hits.length ? hits[i + 1].index : text.length;
     const raw = balanceHighlights(
@@ -756,7 +1372,7 @@ export function getVerseFragments(
       contentStart,
       hardEnd
     );
-    const content = splitVerseParts(stripEditorialBreaks(raw))
+    const content = splitVerseParts(stripCitationGaps(raw))
       .filter((p) => p.length > 0)
       .join(" ");
     fragments.push({ part: hits[i].part, content });
@@ -779,20 +1395,42 @@ export function getVerseContent(
   verseNumber: number,
   part: string | null = null
 ): string | null {
-  const fragments = getVerseFragments(text, verseNumber);
+  return getVerseContentByRef(text, flatVerseRef(verseNumber, part));
+}
+
+export function getVerseContentByRef(
+  text: string,
+  ref: VerseRef
+): string | null {
+  if (ref.number === null) {
+    const hits = scanMarkers(text);
+    const secIdx = hits.findIndex(
+      (h) => h.kind === "section" && h.section === ref.section
+    );
+    if (secIdx === -1) return null;
+    const nextIdx = secIdx + 1;
+    const end =
+      nextIdx < hits.length ? hits[nextIdx].index : text.length;
+    const raw = stripCitationGaps(
+      text.slice(hits[secIdx].afterMarker + 1, end)
+    );
+    return raw.trim().length > 0 ? raw.trim() : null;
+  }
+
+  const part = ref.part;
+  const baseRef: VerseRef = { ...ref, part: null };
+  const fragments = getVerseFragmentsByRef(text, baseRef);
   if (fragments.length === 0) return null;
 
   if (part !== null) {
     const explicit = fragments.find((f) => f.part === part);
     if (explicit) return explicit.content;
 
-    // Derived fallback: only a single plain `[N]` verse exposes
-    // heading/footnote-split parts that aren't authored markers themselves.
     if (fragments.length === 1 && fragments[0].part === null) {
-      const span = findVerseSpan(text, verseNumber);
+      const span = findVerseSpanByRef(text, baseRef);
       if (!span) return null;
       const parts = splitVerseParts(
-        stripEditorialBreaks(text.slice(span.start, span.end))
+        stripCitationGaps(text.slice(span.start, span.end))
       );
       const idx = partToIndex(part);
       if (idx < 0 || idx >= parts.length) return null;
@@ -821,19 +1459,83 @@ export function verseBlockquotePrefix(
   text: string,
   verseNumber: number
 ): string {
-  const re = getVerseRegex();
-  let match: RegExpExecArray | null;
-  while ((match = execVerseMarker(re, text)) !== null) {
-    if (parseMarkerToken(match[0]).number !== verseNumber) continue;
-    const lineStart = text.lastIndexOf("\n", match.index - 1) + 1;
-    const prefix = /^(\s*(?:>\s?)+)/.exec(text.slice(lineStart, match.index));
-    return prefix ? prefix[1] : "";
-  }
-  return "";
+  return verseBlockquotePrefixByRef(text, flatVerseRef(verseNumber));
+}
+
+export function verseBlockquotePrefixByRef(
+  text: string,
+  ref: VerseRef
+): string {
+  const hits = scanMarkers(text);
+  const idx = findHitForRef(hits, ref);
+  if (idx === -1 || !isCitableHit(hits[idx])) return "";
+  const markerIndex = hits[idx].index;
+  const lineStart = text.lastIndexOf("\n", markerIndex - 1) + 1;
+  const prefix = /^(\s*(?:>\s?)+)/.exec(text.slice(lineStart, markerIndex));
+  return prefix ? prefix[1] : "";
 }
 
 /**
- * Returns the raw markdown source covering a verse-number range, as the
+ * Raw markdown slice for a reference range (flat or hierarchical).
+ */
+export function getVerseRangeRawTextByRef(
+  text: string,
+  startRef: VerseRef,
+  endRef: VerseRef
+): string | null {
+  const bounds = verseRangeSourceBounds(text, startRef, endRef);
+  if (!bounds) return null;
+
+  let raw = text.slice(bounds.startPos, bounds.contentEnd);
+  const trimmedLen = raw.trimEnd().length;
+  raw = raw.slice(0, trimmedLen);
+  raw = balanceHighlights(
+    raw,
+    text,
+    bounds.startPos,
+    bounds.startPos + trimmedLen
+  );
+  raw = stripCitationGaps(raw);
+  return stripTrailingHeadingsBeforeNextVerse(raw);
+}
+
+/** Source offset in `text` where a range raw slice begins (for hierarchical LP styling). */
+export function getVerseRangeSourceStart(
+  text: string,
+  startRef: VerseRef,
+  endRef: VerseRef
+): number | null {
+  return verseRangeSourceBounds(text, startRef, endRef)?.startPos ?? null;
+}
+
+/** Source offset of the marker for `ref` (section or child). */
+export function getSourceStartForRef(
+  text: string,
+  ref: VerseRef
+): number | null {
+  const hits = scanMarkers(text);
+  const idx = rangeStartHitIndex(hits, ref);
+  if (idx === -1) return null;
+  return lineLeadStart(text, hits[idx].index);
+}
+
+function verseRangeSourceBounds(
+  text: string,
+  startRef: VerseRef,
+  endRef: VerseRef
+): { startPos: number; contentEnd: number } | null {
+  const hits = scanMarkers(text);
+  const startIdx = rangeStartHitIndex(hits, startRef);
+  const endIdx = rangeEndHitIndex(hits, endRef);
+  if (startIdx === -1 || endIdx === -1 || startIdx > endIdx) return null;
+
+  const startPos = lineLeadStart(text, hits[startIdx].index);
+  const contentEnd = contentEndBeforeNextHit(text, hits, endIdx);
+  return { startPos, contentEnd };
+}
+
+/**
+ * Returns the raw markdown source covering a flat verse-number range, as the
  * *literal document span* from the first marker whose number falls in
  * [start, end] to the end of the last such marker's content.
  *
@@ -843,7 +1545,7 @@ export function verseBlockquotePrefix(
  * early at a number it happens to meet first. Everything physically between
  * those bounds is preserved verbatim: headings, blockquotes, inline markers,
  * and even out-of-range verses (a stray [7] caught in the middle) — all of
- * which the MarkdownRenderer + our post-processor then style like the reading
+ * which the MarkdownRenderer + our own post-processor then style like the reading
  * view. For ordered, non-repeating verses this is identical to the previous
  * "start marker → marker after end" behavior.
  *
@@ -858,7 +1560,7 @@ export function getVerseRangeRawText(
   let firstIdx = -1;
   let lastIdx = -1;
   for (let i = 0; i < hits.length; i++) {
-    if (hits[i].number >= start && hits[i].number <= end) {
+    if (hitInNumericRange(hits[i], start, end)) {
       if (firstIdx === -1) firstIdx = i;
       lastIdx = i;
     }
@@ -866,23 +1568,17 @@ export function getVerseRangeRawText(
 
   if (firstIdx === -1) return null;
 
-  // Include the first marker's blockquote/whitespace lead-in so a `> ` (or
-  // `>[N]`) prefix is preserved and the leading verse keeps its quote.
   const startPos = lineLeadStart(text, hits[firstIdx].index);
-  // End at the marker immediately following the last in-range one, cut at its
-  // line lead-in so a dangling `> ` prefix from a blockquoted next verse
-  // isn't dragged in (it would otherwise block trailing-heading strip).
   const contentEnd =
     lastIdx + 1 < hits.length
       ? lineLeadStart(text, hits[lastIdx + 1].index)
       : text.length;
 
-  const sliceEnd = contentEnd;
-  let raw = text.slice(startPos, sliceEnd);
+  let raw = text.slice(startPos, contentEnd);
   const trimmedLen = raw.trimEnd().length;
   raw = raw.slice(0, trimmedLen);
   raw = balanceHighlights(raw, text, startPos, startPos + trimmedLen);
-  raw = stripEditorialBreaks(raw);
+  raw = stripCitationGaps(raw);
   return stripTrailingHeadingsBeforeNextVerse(raw);
 }
 
@@ -1052,19 +1748,22 @@ export function findVerseLine(
   text: string,
   verseNumber: number
 ): number | null {
-  const re = getVerseRegex();
-  let match: RegExpExecArray | null;
-  while ((match = execVerseMarker(re, text)) !== null) {
-    const num = parseMarkerToken(match[0]).number;
-    if (num === verseNumber) {
-      let line = 0;
-      for (let i = 0; i < match.index; i++) {
-        if (text.charCodeAt(i) === 10) line++;
-      }
-      return line;
-    }
+  return findVerseLineByRef(text, flatVerseRef(verseNumber));
+}
+
+export function findVerseLineByRef(
+  text: string,
+  ref: VerseRef
+): number | null {
+  const hits = scanMarkers(text);
+  const idx = rangeStartHitIndex(hits, ref);
+  if (idx === -1) return null;
+  const markerIndex = hits[idx].index;
+  let line = 0;
+  for (let i = 0; i < markerIndex; i++) {
+    if (text.charCodeAt(i) === 10) line++;
   }
-  return null;
+  return line;
 }
 
 /**
@@ -1098,7 +1797,7 @@ export function continuationPartAnchor(
 ): string | null {
   const lines = text.split("\n");
   let headingCount = 0;
-  let verseNumber: number | null = null;
+  let verseRef: VerseRef | null = null;
   for (let i = blockStartLine - 1; i >= 0; i--) {
     const stripped = stripBlockquoteMarker(lines[i]);
     if (findVerseBreakIndex(lines[i]) !== -1) return null;
@@ -1106,25 +1805,33 @@ export function continuationPartAnchor(
       headingCount++;
       continue;
     }
-    const marker = execVerseMarker(getVerseRegex(), lines[i]);
-    if (marker) {
-      verseNumber = parseMarkerToken(marker[0]).number;
+    const lineStart = charOffsetForLine(text, i);
+    const lineEnd = lineStart + lines[i].length;
+    const hit = scanMarkers(text).find(
+      (h) =>
+        isCitableHit(h) &&
+        h.index >= lineStart &&
+        h.index < lineEnd
+    );
+    if (hit) {
+      verseRef = hitToRef(hit);
       break;
     }
   }
-  if (verseNumber === null || headingCount === 0) return null;
+  if (verseRef === null || verseRef.number === null || headingCount === 0) {
+    return null;
+  }
 
-  // Shift the letter past any interior-footnote parts that live in the
-  // segments preceding this block (segments 0..headingCount-1).
   let index = headingCount;
-  const span = findVerseSpan(text, verseNumber);
+  const span = findVerseSpanByRef(text, verseRef);
   if (span) {
     const segments = versePartSegments(text.slice(span.start, span.end));
     for (let s = 0; s < headingCount && s < segments.length; s++) {
       index += segments[s].length - 1;
     }
   }
-  return `verse-${verseNumber}${String.fromCharCode(97 + index)}`;
+  const letter = String.fromCharCode(97 + index);
+  return verseRefToAnchorId({ ...verseRef, part: letter });
 }
 
 /**
@@ -1141,18 +1848,25 @@ export function partHasAnchor(
   verseNumber: number,
   part: string | null
 ): boolean {
-  if (part === null) return true;
+  return partHasAnchorByRef(text, flatVerseRef(verseNumber, part));
+}
 
-  // An authored marker like [5a] is itself an anchor (the post-processor
-  // gives its span id="verse-5a"), so explicit parts are always anchored.
-  if (scanMarkers(text).some((h) => h.number === verseNumber && h.part === part)) {
+export function partHasAnchorByRef(text: string, ref: VerseRef): boolean {
+  if (ref.part === null) return true;
+
+  const base: VerseRef = { ...ref, part: null };
+  if (
+    scanMarkers(text).some(
+      (h) => refMatchesHit({ ...base, part: ref.part }, h)
+    )
+  ) {
     return true;
   }
 
-  const span = findVerseSpan(text, verseNumber);
-  if (!span) return false;
+  const span = findVerseSpanByRef(text, base);
+  if (!span || ref.number === null) return false;
   const segments = versePartSegments(text.slice(span.start, span.end));
-  const target = partToIndex(part);
+  const target = partToIndex(ref.part);
   let segmentStart = 0;
   for (const segment of segments) {
     if (segmentStart === target) return true;
@@ -1161,20 +1875,19 @@ export function partHasAnchor(
   return false;
 }
 
-/**
- * Returns the authored part of the FIRST marker carrying `verseNumber`
- * (e.g. "a" when the verse is written as scattered [5a]…[5b]…), or null when
- * the first occurrence is a plain `[N]` marker or the verse is absent.
- *
- * Navigation uses this to find a real scroll anchor: a whole-verse reference
- * (verse-5) to a verse with no plain `[5]` marker must fall back to the first
- * fragment's id (verse-5a) since `verse-5` itself never appears in the DOM.
- */
 export function firstFragmentPart(
   text: string,
   verseNumber: number
 ): string | null {
-  const first = scanMarkers(text).find((h) => h.number === verseNumber);
+  return firstFragmentPartByRef(text, flatVerseRef(verseNumber));
+}
+
+export function firstFragmentPartByRef(
+  text: string,
+  ref: VerseRef
+): string | null {
+  const base: VerseRef = { ...ref, part: null };
+  const first = scanMarkers(text).find((h) => refMatchesHit(base, h));
   return first ? first.part : null;
 }
 
@@ -1284,31 +1997,41 @@ export function parseVerseSingle(
 
 /**
  * One contiguous piece of a (possibly disjoint) verse reference. A single
- * verse is represented as a degenerate range where start === end and the
- * endpoint parts are equal.
+ * verse is represented as a degenerate range where start and end refs match.
  */
 export interface VerseSegment {
-  start: number;
-  startPart: string | null;
-  end: number;
-  endPart: string | null;
+  start: VerseRef;
+  end: VerseRef;
 }
 
-/** A single segment's grammar: "N", "Na", "N:M", "Na:Mb", etc. */
-const SEGMENT_SOURCE = String.raw`\d+[a-z]*(?::\d+[a-z]*)?`;
+/** One reference endpoint in a segment piece: `3`, `3a`, `I`, `I.3`, `I.3a`. */
+const ENDPOINT_SOURCE = String.raw`(?:[IVXLCDM]+\.\d+[a-z]*|[IVXLCDM]+|\d+[a-z]*)`;
+
+/** A single segment piece: endpoint or endpoint:endpoint. */
+const SEGMENT_SOURCE = `${ENDPOINT_SOURCE}(?::${ENDPOINT_SOURCE})?`;
+
+function parseSegmentPiece(piece: string): VerseSegment | null {
+  const colon = piece.indexOf(":");
+  if (colon === -1) {
+    const ref = parseVerseRefEndpoint(piece);
+    if (!ref) return null;
+    return { start: ref, end: ref };
+  }
+  const start = parseVerseRefEndpoint(piece.slice(0, colon));
+  const end = parseVerseRefEndpoint(piece.slice(colon + 1));
+  if (!start || !end) return null;
+  return { start, end };
+}
 
 /**
- * Parses a verse reference into one or more ordered segments. Handles every
- * supported form uniformly:
- *   verse-3        → [{3,null,3,null}]
- *   verse-3a       → [{3,"a",3,"a"}]
- *   verse-3:7      → [{3,null,7,null}]
- *   verse-4:6/8:10 → [{4,null,6,null}, {8,null,10,null}]
- *   verse-3/5/7    → [{3,null,3,null}, {5,null,5,null}, {7,null,7,null}]
- *
- * Segments are separated by "/". The "verse-" prefix (required unless
- * `allowShorthand`) applies to the whole reference, not each segment. Returns
- * null if the fragment is not a valid verse reference.
+ * Parses a verse reference into one or more ordered segments. Handles flat,
+ * hierarchical, range, and disjoint forms:
+ *   verse-3           → flat single
+ *   verse-I.3         → scoped child
+ *   verse-I           → whole section (intro + children in raw slices)
+ *   verse-I.3:II.2    → cross-section range
+ *   verse-I:II        → whole sections (raw slice)
+ *   verse-I.1:I.3/II.1:II.2 → disjoint
  */
 export function parseVerseSegments(
   fragment: string,
@@ -1324,43 +2047,125 @@ export function parseVerseSegments(
   }
   if (core.length === 0) return null;
 
-  const segRe = new RegExp(`^(\\d+)([a-z]*)(?::(\\d+)([a-z]*))?$`);
   const segments: VerseSegment[] = [];
   for (const piece of core.split("/")) {
-    const m = segRe.exec(piece);
-    if (!m) return null;
-    const start = parseInt(m[1], 10);
-    const startPart = m[2] === "" ? null : m[2];
-    if (m[3] !== undefined) {
-      segments.push({
-        start,
-        startPart,
-        end: parseInt(m[3], 10),
-        endPart: m[4] === "" ? null : m[4],
-      });
-    } else {
-      segments.push({ start, startPart, end: start, endPart: startPart });
-    }
+    const seg = parseSegmentPiece(piece);
+    if (!seg) return null;
+    segments.push(seg);
   }
   return segments;
 }
 
-/**
- * Strict: explicit "verse-N", "verse-Na", "verse-N:M", any range variant with
- * part suffixes, and disjoint multi-segment forms joined by "/"
- * ("verse-4:6/8:10").
- */
 export const VERSE_FRAGMENT_TEST_STRICT = new RegExp(
   `^verse-${SEGMENT_SOURCE}(?:/${SEGMENT_SOURCE})*$`
 );
 
-/** Loose: explicit OR shorthand (opt-in). */
+/** Loose: explicit OR shorthand (opt-in). Roman hierarchical stays verse- only. */
 export const VERSE_FRAGMENT_TEST_LOOSE = new RegExp(
   `^(?:verse-)?${SEGMENT_SOURCE}(?:/${SEGMENT_SOURCE})*$`
 );
 
-/** Strict range test: explicit forms only, with optional part suffixes. */
-export const VERSE_RANGE_FRAGMENT_TEST_STRICT = /^verse-\d+[a-z]*:\d+[a-z]*$/;
+export const VERSE_RANGE_FRAGMENT_TEST_STRICT = new RegExp(
+  `^verse-${ENDPOINT_SOURCE}:${ENDPOINT_SOURCE}$`
+);
 
-/** Loose range test: explicit OR shorthand range. */
-export const VERSE_RANGE_FRAGMENT_TEST_LOOSE = /^(?:verse-)?\d+[a-z]*:\d+[a-z]*$/;
+export const VERSE_RANGE_FRAGMENT_TEST_LOOSE = new RegExp(
+  `^(?:verse-)?${ENDPOINT_SOURCE}:${ENDPOINT_SOURCE}$`
+);
+
+export function getVersePartsByRef(
+  text: string,
+  ref: VerseRef
+): string[] | null {
+  if (ref.number === null) return null;
+  const span = findVerseSpanByRef(text, ref);
+  if (!span) return null;
+  return splitVerseParts(
+    stripCitationGaps(text.slice(span.start, span.end))
+  );
+}
+
+/** Citable verse refs in document order for a segment (children/flat only). */
+export function enumerateCitableRefsInSegment(
+  text: string,
+  seg: VerseSegment
+): VerseRef[] {
+  const hits = scanMarkers(text);
+  const startIdx = rangeStartHitIndex(hits, seg.start);
+  const endIdx = rangeEndHitIndex(hits, seg.end);
+  if (startIdx === -1 || endIdx === -1 || startIdx > endIdx) return [];
+  const refs: VerseRef[] = [];
+  for (let i = startIdx; i <= endIdx; i++) {
+    if (!isCitableHit(hits[i])) continue;
+    const ref = hitToRef(hits[i]);
+    if (ref && ref.number !== null) refs.push(ref);
+  }
+  return refs;
+}
+
+export function segmentIsDegenerateSingle(seg: VerseSegment): boolean {
+  return verseRefsEqual(seg.start, seg.end);
+}
+
+/** Whether a parsed anchor ref falls inside a segment (document order). */
+export function anchorRefIsInSegment(
+  text: string,
+  ref: VerseRef,
+  seg: VerseSegment
+): boolean {
+  const hits = scanMarkers(text);
+  const startIdx = rangeStartHitIndex(hits, seg.start);
+  const endIdx = rangeEndHitIndex(hits, seg.end);
+  const hitIdx = findHitForRef(hits, ref);
+  if (startIdx === -1 || endIdx === -1 || hitIdx === -1) return false;
+  if (hitIdx < startIdx || hitIdx > endIdx) return false;
+
+  if (verseRefsEqual(ref, seg.start) && seg.start.part !== null) {
+    if (ref.part === null) return false;
+    if (ref.part.charCodeAt(0) < seg.start.part.charCodeAt(0)) return false;
+  }
+  if (verseRefsEqual(ref, seg.end) && seg.end.part !== null) {
+    if (ref.part === null) return false;
+    if (ref.part.charCodeAt(0) > seg.end.part.charCodeAt(0)) return false;
+  }
+  return true;
+}
+
+/** Nearest citable or section marker to `cursorOffset` in `text`. */
+export function nearestVerseRefAtOffset(
+  text: string,
+  cursorOffset: number
+): VerseRef | null {
+  const hits = scanMarkers(text);
+  let best: VerseRef | null = null;
+  let bestDist = Infinity;
+  for (const h of hits) {
+    const ref = hitToRef(h);
+    if (!ref) continue;
+    const dist = Math.min(
+      Math.abs(cursorOffset - h.index),
+      Math.abs(cursorOffset - h.afterMarker)
+    );
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = ref;
+    }
+  }
+  return best;
+}
+
+/** Citable verse refs whose markers fall inside `[selFrom, selTo)`. */
+export function verseRefsInSelection(
+  text: string,
+  selFrom: number,
+  selTo: number
+): VerseRef[] {
+  const hits = scanMarkers(text);
+  const refs: VerseRef[] = [];
+  for (const h of hits) {
+    if (h.index < selFrom || h.index >= selTo) continue;
+    const ref = hitToRef(h);
+    if (ref && ref.number !== null) refs.push(ref);
+  }
+  return refs;
+}

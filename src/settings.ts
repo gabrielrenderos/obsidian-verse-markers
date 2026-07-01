@@ -3,6 +3,7 @@
 
 import { App, PluginSettingTab, Setting } from "obsidian";
 import { refreshAllVerseEmbeds } from "./embeds";
+import { refreshReadingViewVerseMarkers } from "./postprocessor";
 import type VerseMarkersPlugin from "./main";
 
 export interface VerseMarkersSettings {
@@ -23,6 +24,12 @@ export interface VerseMarkersSettings {
   showFootnotesInPopovers: boolean;
   /** Append footnote definitions to verse embeds. */
   showFootnotesInEmbeds: boolean;
+  /**
+   * When true (default), scoped children render with the Roman parent (I.1) and
+   * a Roman marker immediately before its first nested verse is hidden. When
+   * false, the Roman marker is shown and nested verses use Arabic numbers only.
+   */
+  showRomanParentInNestedVerses: boolean;
 }
 
 export const DEFAULT_SETTINGS: VerseMarkersSettings = {
@@ -32,6 +39,7 @@ export const DEFAULT_SETTINGS: VerseMarkersSettings = {
   keepHighlightUntilClick: false,
   showFootnotesInPopovers: true,
   showFootnotesInEmbeds: true,
+  showRomanParentInNestedVerses: true,
 };
 
 export class VerseMarkersSettingTab extends PluginSettingTab {
@@ -119,6 +127,25 @@ export class VerseMarkersSettingTab extends PluginSettingTab {
               this.plugin.settings.hoverPreviewMaxVerses = num;
               await this.plugin.saveSettings();
             }
+          })
+      );
+
+    new Setting(containerEl).setName("Hierarchical display").setHeading();
+
+    new Setting(containerEl)
+      .setName("Show Roman parent in nested verses")
+      .setDesc(
+        "When on (default), nested verses display as I.1, II.3, etc., and a Roman marker immediately before its first nested verse is hidden so labels are not duplicated. " +
+          "When off, the Roman marker is shown and nested verses use Arabic numbers only (1, 2, …). A Roman section with no nested verses always shows the Roman marker."
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.showRomanParentInNestedVerses)
+          .onChange(async (value) => {
+            this.plugin.settings.showRomanParentInNestedVerses = value;
+            await this.plugin.saveSettings();
+            refreshAllVerseEmbeds();
+            refreshReadingViewVerseMarkers(this.app);
           })
       );
 

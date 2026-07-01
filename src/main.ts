@@ -20,7 +20,7 @@
  * detection.ts for the canonical contract.
  */
 import { Plugin, TFile } from "obsidian";
-import { versePostProcessor } from "./postprocessor";
+import { versePostProcessor, configureVerseMarkerDisplay } from "./postprocessor";
 import { registerCommands } from "./commands";
 import { resolveVerseLink, registerVerseLinkNavigation, registerVersePagePreview } from "./references";
 import { registerVerseEmbeds } from "./embeds";
@@ -33,6 +33,7 @@ import {
 } from "./highlightDismiss";
 import { registerNativeFlashPrevention } from "./nativeFlash";
 import { clearReadingViewHighlight } from "./references";
+import { parseVerseRefEndpoint } from "./detection";
 import {
   VerseMarkersSettings,
   DEFAULT_SETTINGS,
@@ -71,6 +72,7 @@ export default class VerseMarkersPlugin extends Plugin {
 
     // Verse navigation highlight: timed fade (default) or keep until click.
     configureVerseHighlightBehavior(() => this.settings);
+    configureVerseMarkerDisplay(() => this.settings);
     registerVerseHighlightDismiss(this);
     onVerseHighlightDismiss(() => clearReadingViewHighlight());
     onVerseHighlightDismiss(() => clearActiveLivePreviewFlash());
@@ -95,13 +97,10 @@ export default class VerseMarkersPlugin extends Plugin {
       const file = this.app.vault.getAbstractFileByPath(filePath);
       if (!(file instanceof TFile)) return;
 
-      // Accept a numeric verse ("5") or one carrying an authored part ("5a"),
-      // plus an optional separate &part= for the plain-number form.
-      const vm = /^(\d+)([a-z]*)$/.exec(verse);
-      if (!vm) return;
-      const verseNum = parseInt(vm[1], 10);
-      const part = vm[2] || params["part"] || "";
-      const fragment = part ? `verse-${verseNum}${part}` : `verse-${verseNum}`;
+      const parsed = parseVerseRefEndpoint(verse);
+      if (!parsed) return;
+
+      const fragment = `verse-${verse}`;
       await resolveVerseLink(this.app, file, fragment);
     });
   }

@@ -22,9 +22,9 @@
  * registration and leave native embeds exactly as they were.
  */
 
-import { App, Component, MarkdownRenderer, TFile, setIcon } from "obsidian";
+import { App, Component, MarkdownRenderer, TFile } from "obsidian";
 import { parseVerseSegments } from "./detection";
-import { buildSegmentsPreviewMarkdown, resolveVerseLink } from "./references";
+import { buildSegmentsPreviewMarkdown, resolveVerseLink, renderVersePreviewNotFound, wireVerseEmbedOpenLink } from "./references";
 import { styleVerseMarkers } from "./postprocessor";
 import { convertHighlightSyntaxToHtml } from "./highlights";
 import type VerseMarkersPlugin from "./main";
@@ -127,14 +127,17 @@ class VerseEmbed extends Component {
     const allowShorthand = this.plugin.settings.enableShorthandSyntax;
 
     const segments = parseVerseSegments(this.fragment, allowShorthand);
-    let markdown: string | null = null;
+    let previewData: Awaited<
+      ReturnType<typeof buildSegmentsPreviewMarkdown>
+    > = null;
     if (segments) {
-      markdown = await buildSegmentsPreviewMarkdown(
+      previewData = await buildSegmentsPreviewMarkdown(
         this.plugin.app,
         this.file,
         segments,
         this.plugin.settings.hoverPreviewMaxVerses,
-        this.plugin.settings.showFootnotesInEmbeds
+        this.plugin.settings.showFootnotesInEmbeds,
+        this.plugin.settings.showRomanParentInNestedVerses
       );
     }
 
@@ -143,7 +146,6 @@ class VerseEmbed extends Component {
 
     const container = this.ctx.containerEl;
     container.empty();
-    container.removeClass("verse-embed-empty");
     container.addClasses(["markdown-embed", "is-loaded", "verse-embed"]);
 
     // Title row: always the file name (no extension). We reuse Obsidian's own
@@ -157,14 +159,28 @@ class VerseEmbed extends Component {
       text: this.file.basename,
     });
 
-    if (!markdown) {
-      container.addClass("verse-embed-empty");
-      container.createDiv({
-        cls: "markdown-embed-content",
-        text: `Couldn't find "${this.fragment}"`,
+    if (!previewData) {
+      await renderVersePreviewNotFound(
+        this.plugin.app,
+        container,
+        this.file,
+        this,
+        this.fragment,
+        "markdown-rendered verse-embed-preview"
+      );
+      wireVerseEmbedOpenLink(container, () => {
+        void resolveVerseLink(
+          this.plugin.app,
+          this.file,
+          this.fragment,
+          allowShorthand
+        );
       });
       return;
     }
+
+    const { markdown, sourceStart } = previewData;
+    const fileContent = await this.plugin.app.vault.cachedRead(this.file);
 
     const content = container.createDiv({ cls: "markdown-embed-content" });
 
@@ -192,22 +208,17 @@ class VerseEmbed extends Component {
     if (myToken !== this.renderToken) return;
 
     // The page post-processor skipped the [N] markers here (this card is an
-    // `.internal-embed`), so style them ourselves — this variant doesn't skip
-    // embed containers. Verse-link hovers are still wired by the page
-    // post-processor's anchor pass, which DOES run inside embeds.
-    styleVerseMarkers(preview);
+    // `.internal-embed`), so style them ourselves with full-file section context.
+    styleVerseMarkers(preview, {
+      fullText: fileContent,
+      sourceStart,
+      showRomanParentInNested:
+        this.plugin.settings.showRomanParentInNestedVerses,
+    });
 
     wrapAsDocumentBlocks(preview);
 
-    // Corner "open" affordance, mirroring Obsidian's native embed chrome.
-    const link = container.createEl("a", {
-      cls: "markdown-embed-link",
-      attr: { "aria-label": "Open link" },
-    });
-    setIcon(link, "lucide-maximize-2");
-    link.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
+    wireVerseEmbedOpenLink(container, () => {
       void resolveVerseLink(
         this.plugin.app,
         this.file,

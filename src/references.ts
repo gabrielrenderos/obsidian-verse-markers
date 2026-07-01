@@ -20,6 +20,7 @@
 
 import {
   App,
+  Component,
   HoverPopover,
   MarkdownRenderer,
   MarkdownView,
@@ -30,20 +31,31 @@ import {
   type OpenViewState,
 } from "obsidian";
 import {
-  findVerseLine,
-  firstFragmentPart,
+  enumerateCitableRefsInSegment,
+  findVerseLineByRef,
+  firstFragmentPartByRef,
   finalizePreviewMarkdown,
   stripAllFootnoteRefs,
-  getVerseContent,
-  getVerseFragments,
-  getVerseParts,
-  getVerseRangeRawText,
+  getVerseContentByRef,
+  getVerseFragmentsByRef,
+  getVersePartsByRef,
+  getVerseRangeRawTextByRef,
   parseVerseSegments,
-  partHasAnchor,
-  verseBlockquotePrefix,
+  parseVerseRefEndpoint,
+  partHasAnchorByRef,
+  anchorRefIsInSegment,
+  segmentIsDegenerateSingle,
+  getSourceStartForRef,
+  verseBlockquotePrefixByRef,
+  verseRefToAnchorId,
+  verseRefToLabel,
+  verseRefToDisplayLabel,
+  verseRefsEqual,
+  flatVerseRef,
+  type VerseRef,
   type VerseSegment,
 } from "./detection";
-import { collectVerseAnchors } from "./postprocessor";
+import { collectVerseAnchors, getShowRomanParentInNestedVerses, styleVerseMarkers } from "./postprocessor";
 import { convertHighlightSyntaxToHtml } from "./highlights";
 import { flashVerseSegmentsInEditor } from "./flashLivePreview";
 import {
@@ -122,99 +134,118 @@ function applyBlockquotePrefix(text: string, prefix: string): string {
  */
 function buildRangeCore(
   content: string,
-  start: number,
-  end: number,
+  seg: VerseSegment,
   maxVerses: number,
-  startPart: string | null,
-  endPart: string | null
+  showRomanParentInNested: boolean
 ): { markdown: string; versesUsed: number } | null {
-  const limit = Math.min(end, start + Math.max(maxVerses, 1) - 1);
+  const start = seg.start;
+  const end = seg.end;
 
-  // Fast path: no part trimming. Return the raw source span so the popover
-  // mirrors the document layout (inline verse markers, paragraphs, headings,
-  // blockquotes). The MarkdownRenderer + our own post-processor handle the
-  // rest, giving the preview the same look as the reading view.
-  if (startPart === null && endPart === null) {
-    const raw = getVerseRangeRawText(content, start, limit);
+  if (start.part === null && end.part === null) {
+    const raw = getVerseRangeRawTextByRef(content, start, end);
     if (!raw || raw.length === 0) return null;
-    return { markdown: raw, versesUsed: limit - start + 1 };
+    const count = enumerateCitableRefsInSegment(content, seg).length;
+    return {
+      markdown: raw,
+      versesUsed: Math.min(Math.max(count, 1), maxVerses),
+    };
   }
 
-  // Trimmed path: one or both endpoints reference a specific part, so we
-  // can't just slice the raw source — rebuild verse by verse instead.
   const blocks: string[] = [];
-  for (let n = start; n <= limit; n++) {
-    const trimStart = n === start && startPart !== null;
-    const trimEnd = n === limit && n === end && endPart !== null;
+  let versesUsed = 0;
+  for (const ref of enumerateCitableRefsInSegment(content, seg)) {
+    if (versesUsed >= maxVerses) break;
+
+    const trimStart = verseRefsEqual(ref, start) && start.part !== null;
+    const trimEnd = verseRefsEqual(ref, end) && end.part !== null;
 
     let verseText: string | null;
-    let label = `${n}`;
+    let label = verseRefToDisplayLabel(ref, showRomanParentInNested);
 
     if (trimStart || trimEnd) {
-      const parts = getVerseParts(content, n);
+      const parts = getVersePartsByRef(content, ref);
       if (!parts) continue;
-      const sliceStart = trimStart && startPart !== null ? partToIndex(startPart) : 0;
-      const sliceEnd = trimEnd && endPart !== null ? partToIndex(endPart) + 1 : parts.length;
+      const sliceStart =
+        trimStart && start.part !== null ? partToIndex(start.part) : 0;
+      const sliceEnd =
+        trimEnd && end.part !== null
+          ? partToIndex(end.part) + 1
+          : parts.length;
       if (sliceStart < 0 || sliceStart >= parts.length) continue;
       if (sliceEnd <= sliceStart) continue;
-      const sliced = parts.slice(sliceStart, sliceEnd).filter((p) => p.length > 0);
+      const sliced = parts
+        .slice(sliceStart, sliceEnd)
+        .filter((p) => p.length > 0);
       if (sliced.length === 0) continue;
       verseText = sliced.join(" ");
-      if (trimStart) label = `${n}${startPart}`;
+      if (trimStart && start.part !== null) {
+        label = verseRefToDisplayLabel(
+          { ...ref, part: start.part },
+          showRomanParentInNested
+        );
+      }
     } else {
-      verseText = getVerseContent(content, n);
+      verseText = getVerseContentByRef(content, ref);
       if (verseText === null) continue;
     }
 
     const line = `${verseMarkerLabel(label)} ${verseText}`;
-    blocks.push(applyBlockquotePrefix(line, verseBlockquotePrefix(content, n)));
+    blocks.push(
+      applyBlockquotePrefix(line, verseBlockquotePrefixByRef(content, ref))
+    );
+    versesUsed++;
   }
 
   if (blocks.length === 0) return null;
-  return { markdown: blocks.join("\n\n"), versesUsed: limit - start + 1 };
+  return { markdown: blocks.join("\n\n"), versesUsed };
 }
 
 /**
  * Builds the preview markdown for a single verse, WITHOUT footnote append.
- *
- * `part` (optional) selects a specific sub-part — an authored [Na] fragment if
- * one exists, else a heading/footnote-split segment. For a whole-verse
- * reference (part null) to a verse the editor split into scattered fragments
- * ([5a]…[5b]…), each fragment is rendered as its own block (labeled with its
- * own marker, kept on a separate line), omitting the heading and any verses
- * physically between them. A plain `[N]` verse stays a single block.
  */
 function buildSingleCore(
   content: string,
-  verse: number,
-  part: string | null
+  ref: VerseRef,
+  showRomanParentInNested: boolean
 ): string | null {
-  const prefix = verseBlockquotePrefix(content, verse);
+  const part = ref.part;
+
+  if (ref.number === null) {
+    const raw = getVerseRangeRawTextByRef(content, ref, ref);
+    return raw && raw.length > 0 ? raw : null;
+  }
+
+  const prefix = verseBlockquotePrefixByRef(content, ref);
 
   if (part !== null) {
-    const verseText = getVerseContent(content, verse, part);
+    const verseText = getVerseContentByRef(content, ref);
     if (verseText === null || verseText.length === 0) return null;
-    const line = `${verseMarkerLabel(`${verse}${part}`)} ${verseText}`;
+    const line = `${verseMarkerLabel(verseRefToDisplayLabel(ref, showRomanParentInNested))} ${verseText}`;
     return applyBlockquotePrefix(line, prefix);
   }
 
-  const fragments = getVerseFragments(content, verse);
+  const baseRef: VerseRef = { ...ref, part: null };
+  const fragments = getVerseFragmentsByRef(content, baseRef);
   if (fragments.length === 0) return null;
 
-  // Plain single `[N]`: raw slice preserves ==highlight== wrapping the marker
-  // (when the highlight opens before it), so popover/embed match reading view.
-  // Raw text already includes blockquote `>` via lineLeadStart — do not re-wrap.
-  if (fragments.length === 1 && fragments[0].part === null) {
-    const raw = getVerseRangeRawText(content, verse, verse);
-    if (raw && raw.length > 0) {
-      return raw;
-    }
+  if (
+    fragments.length === 1 &&
+    fragments[0].part === null &&
+    segmentIsDegenerateSingle({ start: ref, end: ref })
+  ) {
+    const raw = getVerseRangeRawTextByRef(content, ref, ref);
+    if (raw && raw.length > 0) return raw;
   }
 
   const blocks = fragments
     .filter((f) => f.content.length > 0)
     .map((f) => {
-      const label = f.part ? `${verse}${f.part}` : `${verse}`;
+      const label = f.part
+        ? verseRefToDisplayLabel(
+            { ...baseRef, part: f.part },
+            showRomanParentInNested
+          )
+        : verseRefToDisplayLabel(baseRef, showRomanParentInNested);
       const line = `${verseMarkerLabel(label)} ${f.content}`;
       return applyBlockquotePrefix(line, prefix);
     });
@@ -236,15 +267,16 @@ export async function buildRangePreviewMarkdown(
   endPart: string | null = null
 ): Promise<string | null> {
   const content = await app.vault.cachedRead(file);
-  const core = buildRangeCore(content, start, end, maxVerses, startPart, endPart);
+  const seg: VerseSegment = {
+    start: flatVerseRef(start, startPart),
+    end: flatVerseRef(end, endPart),
+  };
+  const showRoman = getShowRomanParentInNestedVerses();
+  const core = buildRangeCore(content, seg, maxVerses, showRoman);
   if (!core) return null;
   return finalizePreviewMarkdown(core.markdown, content);
 }
 
-/**
- * Builds the markdown source for a single-verse preview. Public wrapper that
- * reads the file and appends any missing footnote definitions once.
- */
 export async function buildSinglePreviewMarkdown(
   app: App,
   file: TFile,
@@ -252,9 +284,64 @@ export async function buildSinglePreviewMarkdown(
   part: string | null
 ): Promise<string | null> {
   const content = await app.vault.cachedRead(file);
-  const core = buildSingleCore(content, verse, part);
+  const showRoman = getShowRomanParentInNestedVerses();
+  const core = buildSingleCore(content, flatVerseRef(verse, part), showRoman);
   if (!core) return null;
   return finalizePreviewMarkdown(core, content);
+}
+
+/**
+ * Result of building preview markdown for a verse reference.
+ */
+export interface SegmentsPreviewResult {
+  markdown: string;
+  /** Offset in the source file where the excerpt begins (for hierarchical styling). */
+  sourceStart: number;
+}
+
+/** Markdown for Obsidian's native subpath-not-found embed message (H5 + curly quotes). */
+export function versePreviewNotFoundMarkdown(
+  subpath: string,
+  fileBasename: string
+): string {
+  return `##### Unable to find \u201c${subpath}\u201d in ${fileBasename}`;
+}
+
+/** Renders Obsidian's native embed not-found message into `parent`. */
+export async function renderVersePreviewNotFound(
+  app: App,
+  parent: HTMLElement,
+  file: TFile,
+  component: Component,
+  subpath: string,
+  previewCls = "markdown-rendered"
+): Promise<void> {
+  const content = parent.createDiv({ cls: "markdown-embed-content" });
+  const preview = content.createDiv({ cls: previewCls });
+  await MarkdownRenderer.render(
+    app,
+    versePreviewNotFoundMarkdown(subpath, file.basename),
+    preview,
+    file.path,
+    component
+  );
+}
+
+/** Corner "open" affordance on a `.markdown-embed` card (native embed chrome). */
+export function wireVerseEmbedOpenLink(
+  embedEl: HTMLElement,
+  onClick: (ev: MouseEvent) => void
+): void {
+  const openLink = embedEl.createEl("a", {
+    cls: "markdown-embed-link",
+    attr: { "aria-label": "Open link" },
+  });
+  setIcon(openLink, "lucide-maximize-2");
+  openLink.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    onClick(ev);
+  });
 }
 
 /**
@@ -271,41 +358,48 @@ export async function buildSegmentsPreviewMarkdown(
   file: TFile,
   segments: VerseSegment[],
   maxVerses: number,
-  showFootnotes = true
-): Promise<string | null> {
+  showFootnotes = true,
+  showRomanParentInNested = getShowRomanParentInNestedVerses()
+): Promise<SegmentsPreviewResult | null> {
   const content = await app.vault.cachedRead(file);
   const blocks: string[] = [];
   let remaining = maxVerses;
+  let sourceStart: number | null = null;
 
   for (const seg of segments) {
     if (remaining <= 0) break;
-    const isSingle = seg.start === seg.end && seg.startPart === seg.endPart;
-    if (isSingle) {
-      const core = buildSingleCore(content, seg.start, seg.startPart);
-      if (core) {
-        blocks.push(core);
-        remaining -= 1;
+    if (segmentIsDegenerateSingle(seg)) {
+      const core = buildSingleCore(content, seg.start, showRomanParentInNested);
+      if (!core) return null;
+      blocks.push(core);
+      if (sourceStart === null) {
+        sourceStart = getSourceStartForRef(content, seg.start);
       }
+      remaining -= 1;
     } else {
       const core = buildRangeCore(
         content,
-        seg.start,
-        seg.end,
+        seg,
         remaining,
-        seg.startPart,
-        seg.endPart
+        showRomanParentInNested
       );
-      if (core) {
-        blocks.push(core.markdown);
-        remaining -= core.versesUsed;
+      if (!core) return null;
+      blocks.push(core.markdown);
+      if (sourceStart === null) {
+        sourceStart = getSourceStartForRef(content, seg.start);
       }
+      remaining -= core.versesUsed;
     }
   }
 
   if (blocks.length === 0) return null;
-  const markdown = blocks.join("\n\n");
-  if (!showFootnotes) return stripAllFootnoteRefs(markdown);
-  return finalizePreviewMarkdown(markdown, content);
+  let markdown = blocks.join("\n\n");
+  if (!showFootnotes) markdown = stripAllFootnoteRefs(markdown);
+  else markdown = finalizePreviewMarkdown(markdown, content);
+  return {
+    markdown,
+    sourceStart: sourceStart ?? 0,
+  };
 }
 
 /* ---------------------------------------------------------------------------
@@ -542,15 +636,18 @@ async function renderVersePopover(
   allowShorthand: boolean
 ): Promise<void> {
   const segments = parseVerseSegments(fragment, allowShorthand);
-  if (!segments) return;
+  const previewData = segments
+    ? await buildSegmentsPreviewMarkdown(
+        plugin.app,
+        file,
+        segments,
+        plugin.settings.hoverPreviewMaxVerses,
+        plugin.settings.showFootnotesInPopovers,
+        plugin.settings.showRomanParentInNestedVerses
+      )
+    : null;
 
-  const markdown = await buildSegmentsPreviewMarkdown(
-    plugin.app,
-    file,
-    segments,
-    plugin.settings.hoverPreviewMaxVerses
-  );
-  if (!isAlive() || !markdown) return;
+  if (!isAlive()) return;
 
   const hoverEl = popover.hoverEl;
   const win = hoverEl.ownerDocument.defaultView ?? window;
@@ -561,6 +658,22 @@ async function renderVersePopover(
     );
   }
   if (!isAlive()) return;
+
+  if (!segments || !previewData) {
+    await renderVersePopoverNotFound(
+      plugin,
+      popover,
+      hoverEl,
+      file,
+      fragment,
+      sourcePath
+    );
+    revealVersePopover(popover, hoverEl);
+    return;
+  }
+
+  const { markdown, sourceStart } = previewData;
+  const fileContent = await plugin.app.vault.cachedRead(file);
 
   // Obsidian's class hierarchy, so themes style the popover like the native
   // page-preview: .markdown-embed > .markdown-embed-content > .markdown-rendered.
@@ -580,27 +693,56 @@ async function renderVersePopover(
   );
   if (!isAlive()) return;
 
+  styleVerseMarkers(preview, {
+    fullText: fileContent,
+    sourceStart,
+    showRomanParentInNested: plugin.settings.showRomanParentInNestedVerses,
+  });
+
   applyFootnotePreviewDisplay(preview, plugin.settings.showFootnotesInPopovers);
 
-  // Corner "open" affordance, same chrome class as the native popover.
-  const openLink = embed.createEl("a", {
-    cls: "markdown-embed-link",
-    attr: { "aria-label": "Open link" },
-  });
-  setIcon(openLink, "lucide-maximize-2");
-  openLink.addEventListener("click", (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
+  wireVerseEmbedOpenLink(embed, () => {
     hidePopover(popover);
     void resolveVerseLink(plugin.app, file, fragment, allowShorthand);
   });
 
   wirePopoverAnchors(plugin, preview, popover, sourcePath);
 
-  // Now that the real content is in place we know the popover's true size, so
-  // place it against the viewport (flip above / clamp to edges) the way the
-  // native popover does, then reveal it. Obsidian's own placement ran while the
-  // frame was still empty, hence this final pass.
+  revealVersePopover(popover, hoverEl);
+}
+
+async function renderVersePopoverNotFound(
+  plugin: VerseMarkersPlugin,
+  popover: VerseHoverPopover,
+  hoverEl: HTMLElement,
+  file: TFile,
+  fragment: string,
+  sourcePath: string
+): Promise<void> {
+  hoverEl.empty();
+  const embed = hoverEl.createDiv({ cls: "markdown-embed is-loaded" });
+  await renderVersePreviewNotFound(
+    plugin.app,
+    embed,
+    file,
+    popover,
+    fragment,
+    "markdown-preview-view markdown-rendered"
+  );
+  wireVerseEmbedOpenLink(embed, () => {
+    hidePopover(popover);
+    void plugin.app.workspace.openLinkText(
+      `${file.basename}#${fragment}`,
+      sourcePath
+    );
+  });
+}
+
+/** Positions and reveals a verse hover popover after content (or an error) is ready. */
+function revealVersePopover(
+  popover: VerseHoverPopover,
+  hoverEl: HTMLElement
+): void {
   const targetEl = popover.__verseTargetEl ?? null;
   if (targetEl) positionVersePopover(hoverEl, targetEl);
   hoverEl.removeClass("verse-hover-measuring");
@@ -779,8 +921,7 @@ export async function resolveVerseLink(
   const segments = parseVerseSegments(fragment, allowShorthand);
   if (!segments || segments.length === 0) return false;
 
-  let startVerse = segments[0].start;
-  let startPart = segments[0].startPart;
+  const startRef = segments[0].start;
 
   const activeMd = app.workspace.getActiveViewOfType(MarkdownView);
   const leaf = options?.newLeaf
@@ -788,35 +929,32 @@ export async function resolveVerseLink(
     : activeMd?.leaf ?? app.workspace.getMostRecentLeaf();
   if (!leaf) return false;
 
-  // Pre-compute the verse's source line and anchor IDs once so we can
-  // decide whether eState's forced scroll is even needed.
   const content = await app.vault.cachedRead(file);
 
-  // Interior footnote parts have no scroll anchor in the reading view (only
-  // heading-boundary parts and part "a" do). When the referenced part isn't
-  // anchored, drop the part suffix so navigation scrolls to and flashes the
-  // complete verse instead of nothing. Heading-split parts are unaffected.
-  // Normalize every segment's endpoints the same way for the flash below.
   const flashSegments: VerseSegment[] = segments.map((seg) => ({
-    start: seg.start,
-    startPart: partHasAnchor(content, seg.start, seg.startPart)
-      ? seg.startPart
-      : null,
-    end: seg.end,
-    endPart: partHasAnchor(content, seg.end, seg.endPart) ? seg.endPart : null,
+    start: {
+      ...seg.start,
+      part: partHasAnchorByRef(content, seg.start) ? seg.start.part : null,
+    },
+    end: {
+      ...seg.end,
+      part: partHasAnchorByRef(content, seg.end) ? seg.end.part : null,
+    },
   }));
-  startPart = flashSegments[0].startPart;
+  const navStart = flashSegments[0].start;
 
-  const targetLine = findVerseLine(content, startVerse);
-  const primaryId = startPart
-    ? `verse-${startVerse}${startPart}`
-    : `verse-${startVerse}`;
-  // A whole-verse reference to a verse authored as scattered fragments has no
-  // plain `verse-N` element (only `verse-Na`, `verse-Nb`, …). Fall back to the
-  // first fragment's anchor so navigation still lands on the verse.
-  const firstPart = firstFragmentPart(content, startVerse);
+  const targetLine = findVerseLineByRef(content, navStart);
+  const primaryId = verseRefToAnchorId(navStart);
+  const firstPart = firstFragmentPartByRef(content, {
+    ...navStart,
+    part: null,
+  });
   const fallbackId =
-    !startPart && firstPart ? `verse-${startVerse}${firstPart}` : `verse-${startVerse}`;
+    navStart.part === null &&
+    firstPart &&
+    navStart.number !== null
+      ? verseRefToAnchorId({ ...navStart, part: firstPart })
+      : primaryId;
 
   // Decide whether we need a scroll-only jump after open. Reading-view
   // anchors that are already mounted get smoothScrollAnchorToCenter; cold
@@ -905,7 +1043,7 @@ export async function resolveVerseLink(
         }
       });
     }
-    flashVerseSegments(flashSegments, previewRoot);
+    flashVerseSegments(flashSegments, previewRoot, content);
   }
 
   return true;
@@ -1088,9 +1226,10 @@ export function clearReadingViewHighlight(fadeOut = true): void {
  */
 function flashVerseSegments(
   segments: VerseSegment[],
-  root: ParentNode
+  root: ParentNode,
+  text: string
 ): void {
-  const flashRanges = buildVerseFlashRanges(segments, root);
+  const flashRanges = buildVerseFlashRanges(segments, root, text);
   if (flashRanges.length === 0) return;
 
   clearReadingViewHighlight(false);
@@ -1188,45 +1327,20 @@ function unwrapFlashSpans(): void {
   activeFlashSpans = [];
 }
 
-/**
- * Reports whether a verse anchor numbered `n` with part `part` (null for a
- * plain marker) falls inside `seg`, honoring part-trims at the endpoints.
- */
-function anchorInSegment(
-  n: number,
-  part: string | null,
-  seg: VerseSegment
-): boolean {
-  if (n < seg.start || n > seg.end) return false;
-  if (n === seg.start && seg.startPart !== null) {
-    if (part === null) return false;
-    if (part.charCodeAt(0) < seg.startPart.charCodeAt(0)) return false;
-  }
-  if (n === seg.end && seg.endPart !== null && part !== null) {
-    if (part.charCodeAt(0) > seg.endPart.charCodeAt(0)) return false;
-  }
-  return true;
-}
-
-/**
- * Returns the verse-anchor elements that fall within ANY of the reference's
- * segments, applying part-trim rules at each segment's endpoints. Verses that
- * lie in a gap between segments (e.g. 7 in 4:6/8:10) are excluded. Returned in
- * document order — `querySelectorAll` already provides that.
- */
 function collectInSegmentsAnchors(
   segments: VerseSegment[],
-  root: ParentNode
+  root: ParentNode,
+  text: string
 ): HTMLElement[] {
   const all = root.querySelectorAll<HTMLElement>('[id^="verse-"]');
   const inRange: HTMLElement[] = [];
   for (let i = 0; i < all.length; i++) {
     const el = all[i];
-    const m = /^verse-(\d+)([a-z]+)?$/.exec(el.id);
-    if (!m) continue;
-    const n = parseInt(m[1], 10);
-    const part = m[2] ?? null;
-    if (segments.some((seg) => anchorInSegment(n, part, seg))) inRange.push(el);
+    const ref = parseVerseRefEndpoint(el.id.slice("verse-".length));
+    if (!ref) continue;
+    if (segments.some((seg) => anchorRefIsInSegment(text, ref, seg))) {
+      inRange.push(el);
+    }
   }
   return inRange;
 }
@@ -1318,18 +1432,17 @@ interface FlashRange {
  */
 function buildVerseFlashRanges(
   segments: VerseSegment[],
-  root: ParentNode
+  root: ParentNode,
+  text: string
 ): FlashRange[] {
-  const inRange = collectInSegmentsAnchors(segments, root);
+  const inRange = collectInSegmentsAnchors(segments, root, text);
   if (inRange.length === 0) return [];
 
-  // Need every verse-* anchor in document order to find the immediate
-  // next stopping point for each in-range one (the next anchor may itself
-  // be out of range — e.g. the verse right after the end of a segment).
   const allValidAnchors: HTMLElement[] = [];
   const all = root.querySelectorAll<HTMLElement>('[id^="verse-"]');
   for (let i = 0; i < all.length; i++) {
-    if (/^verse-\d+[a-z]*$/.test(all[i].id)) allValidAnchors.push(all[i]);
+    const ref = parseVerseRefEndpoint(all[i].id.slice("verse-".length));
+    if (ref) allValidAnchors.push(all[i]);
   }
 
   const inRangeSet = new Set<HTMLElement>(inRange);
