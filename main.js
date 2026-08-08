@@ -1335,10 +1335,7 @@ function appendVerseText(fragment, text, state) {
   if (text.length === 0)
     return;
   if (isEditorialText(state)) {
-    const span = activeDocument.createElement("span");
-    span.className = "verse-editorial";
-    span.appendChild(activeDocument.createTextNode(text));
-    fragment.appendChild(span);
+    fragment.appendChild(createSpan({ cls: "verse-editorial", text }));
     return;
   }
   fragment.appendChild(activeDocument.createTextNode(text));
@@ -1358,11 +1355,13 @@ function appendVerseMarker(fragment, state, token, renderCtx, markerIndex) {
       }
     }
     const ref2 = { section, number: null, part: null };
-    const markerEl2 = activeDocument.createElement("span");
-    markerEl2.className = "verse-marker";
-    markerEl2.id = verseRefToAnchorId(ref2);
-    markerEl2.textContent = section;
-    fragment.appendChild(markerEl2);
+    fragment.appendChild(
+      createSpan({
+        cls: "verse-marker",
+        text: section,
+        attr: { id: verseRefToAnchorId(ref2) }
+      })
+    );
     return;
   }
   const { number, part } = parseMarkerToken(token);
@@ -1370,14 +1369,13 @@ function appendVerseMarker(fragment, state, token, renderCtx, markerIndex) {
   if (state.sawSection && state.currentSection !== null && state.structuredFlowActive && state.scopedChildrenActive) {
     ref = { section: state.currentSection, number, part };
   }
-  const markerEl = activeDocument.createElement("span");
-  markerEl.className = "verse-marker";
-  markerEl.id = verseRefToAnchorId(ref);
-  markerEl.textContent = verseRefToDisplayLabel(
-    ref,
-    renderCtx.showRomanParentInNested
+  fragment.appendChild(
+    createSpan({
+      cls: "verse-marker",
+      text: verseRefToDisplayLabel(ref, renderCtx.showRomanParentInNested),
+      attr: { id: verseRefToAnchorId(ref) }
+    })
   );
-  fragment.appendChild(markerEl);
 }
 function nextInlineToken(text, from) {
   return nextProcessToken(text, from);
@@ -1395,13 +1393,13 @@ function processTextNode(textNode, state, renderCtx) {
   if (!parent)
     return false;
   if (!hasToken) {
-    const span = activeDocument.createElement("span");
-    span.className = "verse-editorial";
-    span.appendChild(activeDocument.createTextNode(text));
-    parent.replaceChild(span, textNode);
+    parent.replaceChild(
+      createSpan({ cls: "verse-editorial", text }),
+      textNode
+    );
     return true;
   }
-  const fragment = activeDocument.createDocumentFragment();
+  const fragment = createFragment();
   let lastIndex = 0;
   let pos = 0;
   while (pos < text.length) {
@@ -1488,11 +1486,13 @@ function partAnchorForBlock(el, ctx) {
 function injectPartAnchor(el, id) {
   if (el.querySelector(`#${CSS.escape(id)}`))
     return;
-  const anchor = activeDocument.createElement("span");
-  anchor.id = id;
-  anchor.className = "verse-part-anchor";
-  anchor.setAttribute("aria-hidden", "true");
-  el.insertBefore(anchor, el.firstChild);
+  el.insertBefore(
+    createSpan({
+      cls: "verse-part-anchor",
+      attr: { id, "aria-hidden": "true" }
+    }),
+    el.firstChild
+  );
 }
 function hideVerseBreakBlock(el, ctx) {
   const info = ctx.getSectionInfo(el);
@@ -2884,8 +2884,7 @@ function wrapRangeWithSpans(range, className, trimTrailingEnd = false) {
     const parent = node.parentNode;
     if (!parent)
       continue;
-    const span = activeDocument.createElement("span");
-    span.className = className;
+    const span = createSpan({ cls: className });
     parent.insertBefore(span, node);
     span.appendChild(node);
     spans.push(span);
@@ -2998,12 +2997,12 @@ function buildFlashRangeForAnchor(anchor, root, cap) {
 function startFlashObserver(root) {
   stopFlashObserver();
   const rootNode = root;
-  const observeTarget = rootNode.instanceOf(Element) ? root : rootNode.instanceOf(Document) ? root.body : rootNode;
+  const observeTarget = rootNode.instanceOf(Element) ? rootNode : rootNode.instanceOf(Document) ? rootNode.body : rootNode;
   flashObserver = new MutationObserver((mutations) => {
     for (const m of mutations) {
       for (let i = 0; i < m.addedNodes.length; i++) {
         const node = m.addedNodes[i];
-        if (!(node instanceof Element))
+        if (!node.instanceOf(Element))
           continue;
         if (node.id && node.id.startsWith("verse-")) {
           applyProgressiveFlash({ initial: false });
@@ -3049,10 +3048,8 @@ function refreshAllVerseEmbeds() {
   }
 }
 function wrapAsDocumentBlocks(preview) {
-  const doc = preview.ownerDocument;
   for (const child of Array.from(preview.children)) {
-    const wrapper = doc.createElement("div");
-    wrapper.className = `el-${child.tagName.toLowerCase()}`;
+    const wrapper = createDiv({ cls: `el-${child.tagName.toLowerCase()}` });
     preview.insertBefore(wrapper, child);
     wrapper.appendChild(child);
   }
@@ -3198,10 +3195,10 @@ var VerseMarkerBracketWidget = class extends import_view3.WidgetType {
     return false;
   }
   toDOM() {
-    const wrap = activeDocument.createElement("span");
-    wrap.className = ["verse-marker-bracket", "verse-marker-widget", this.flashClass].filter(Boolean).join(" ");
-    wrap.textContent = this.bracket;
-    return wrap;
+    return createSpan({
+      cls: ["verse-marker-bracket", "verse-marker-widget", this.flashClass].filter(Boolean),
+      text: this.bracket
+    });
   }
 };
 var VerseMarkerWidget = class extends import_view3.WidgetType {
@@ -3220,18 +3217,12 @@ var VerseMarkerWidget = class extends import_view3.WidgetType {
     return true;
   }
   toDOM(view) {
-    const wrap = activeDocument.createElement("span");
-    wrap.className = ["verse-marker-widget", this.flashClass].filter(Boolean).join(" ");
-    const open = activeDocument.createElement("span");
-    open.className = "verse-marker-bracket";
-    open.textContent = "[";
-    const label = activeDocument.createElement("span");
-    label.className = "verse-marker";
-    label.textContent = this.label;
-    const close = activeDocument.createElement("span");
-    close.className = "verse-marker-bracket";
-    close.textContent = "]";
-    wrap.append(open, label, close);
+    const wrap = createSpan({
+      cls: ["verse-marker-widget", this.flashClass].filter(Boolean)
+    });
+    wrap.createSpan({ cls: "verse-marker-bracket", text: "[" });
+    wrap.createSpan({ cls: "verse-marker", text: this.label });
+    wrap.createSpan({ cls: "verse-marker-bracket", text: "]" });
     const placeCaretInside = (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -3511,6 +3502,69 @@ var VerseMarkersSettingTab = class extends import_obsidian6.PluginSettingTab {
         refreshAllVerseEmbeds();
       })
     );
+  }
+  /**
+   * Declarative index of every setting rendered by display(). Called by
+   * Obsidian 1.13.0+ once for search indexing so users can find these
+   * settings via Settings → search. Rendering stays in display(); we don't
+   * expose control types here, so the framework doesn't attempt to render
+   * from definitions and there's no risk of duplicate UI.
+   */
+  getSettingDefinitions() {
+    return [
+      {
+        type: "group",
+        heading: "Reference syntax",
+        items: [
+          {
+            name: "Enable range hover previews",
+            desc: "Show a popover with verse content when hovering over [[FILE#verse-N:M]] links."
+          },
+          {
+            name: "Enable shorthand reference syntax",
+            desc: 'Recognize [[File#3]] and [[File#3:7]] in addition to the default [[File#verse-3]] form. Warning: enabling this will intercept links to headings literally named "3" or "3:7".'
+          }
+        ]
+      },
+      {
+        type: "group",
+        heading: "Navigation highlight",
+        items: [
+          {
+            name: "Keep temporary highlight until click",
+            desc: "When off (default), the verse highlight after navigation fades automatically after a few seconds. When on, it stays visible until you click elsewhere."
+          },
+          {
+            name: "Max verses in hover preview",
+            desc: "Maximum number of verses to display in a range hover preview."
+          }
+        ]
+      },
+      {
+        type: "group",
+        heading: "Hierarchical display",
+        items: [
+          {
+            name: "Show Roman parent in nested verses",
+            desc: "When on (default), nested verses display as I.1, II.3, etc., and a Roman marker immediately before its first nested verse is hidden so labels are not duplicated. When off, the Roman marker is shown and nested verses use Arabic numbers only."
+          }
+        ]
+      },
+      {
+        type: "group",
+        heading: "Show footnotes",
+        items: [
+          {
+            name: "Show footnotes in popovers",
+            desc: "Show the footnote list at the bottom of hover previews. Footnote references in the verse text stay hoverable either way."
+          },
+          {
+            name: "Show footnotes in embeds",
+            desc: "Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds."
+          }
+        ]
+      }
+    ];
   }
 };
 

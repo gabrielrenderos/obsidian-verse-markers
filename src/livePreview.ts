@@ -67,12 +67,11 @@ class VerseMarkerBracketWidget extends WidgetType {
   }
 
   toDOM(): HTMLElement {
-    const wrap = activeDocument.createElement("span");
-    wrap.className = ["verse-marker-bracket", "verse-marker-widget", this.flashClass]
-      .filter(Boolean)
-      .join(" ");
-    wrap.textContent = this.bracket;
-    return wrap;
+    return createSpan({
+      cls: ["verse-marker-bracket", "verse-marker-widget", this.flashClass]
+        .filter(Boolean),
+      text: this.bracket,
+    });
   }
 }
 
@@ -103,24 +102,13 @@ class VerseMarkerWidget extends WidgetType {
   }
 
   toDOM(view: EditorView): HTMLElement {
-    const wrap = activeDocument.createElement("span");
-    wrap.className = ["verse-marker-widget", this.flashClass]
-      .filter(Boolean)
-      .join(" ");
+    const wrap = createSpan({
+      cls: ["verse-marker-widget", this.flashClass].filter(Boolean),
+    });
 
-    const open = activeDocument.createElement("span");
-    open.className = "verse-marker-bracket";
-    open.textContent = "[";
-
-    const label = activeDocument.createElement("span");
-    label.className = "verse-marker";
-    label.textContent = this.label;
-
-    const close = activeDocument.createElement("span");
-    close.className = "verse-marker-bracket";
-    close.textContent = "]";
-
-    wrap.append(open, label, close);
+    wrap.createSpan({ cls: "verse-marker-bracket", text: "[" });
+    wrap.createSpan({ cls: "verse-marker", text: this.label });
+    wrap.createSpan({ cls: "verse-marker-bracket", text: "]" });
 
     const placeCaretInside = (event: MouseEvent) => {
       event.preventDefault();

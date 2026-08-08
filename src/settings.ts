@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2025 Gabriel Renderos
 
-import { App, PluginSettingTab, Setting } from "obsidian";
+import {
+  App,
+  PluginSettingTab,
+  Setting,
+  type SettingDefinitionItem,
+} from "obsidian";
 import { refreshAllVerseEmbeds } from "./embeds";
 import { refreshReadingViewVerseMarkers } from "./postprocessor";
 import type VerseMarkersPlugin from "./main";
@@ -179,5 +184,69 @@ export class VerseMarkersSettingTab extends PluginSettingTab {
             refreshAllVerseEmbeds();
           })
       );
+  }
+
+  /**
+   * Declarative index of every setting rendered by display(). Called by
+   * Obsidian 1.13.0+ once for search indexing so users can find these
+   * settings via Settings → search. Rendering stays in display(); we don't
+   * expose control types here, so the framework doesn't attempt to render
+   * from definitions and there's no risk of duplicate UI.
+   */
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [
+      {
+        type: "group",
+        heading: "Reference syntax",
+        items: [
+          {
+            name: "Enable range hover previews",
+            desc: "Show a popover with verse content when hovering over [[FILE#verse-N:M]] links.",
+          },
+          {
+            name: "Enable shorthand reference syntax",
+            desc: "Recognize [[File#3]] and [[File#3:7]] in addition to the default [[File#verse-3]] form. Warning: enabling this will intercept links to headings literally named \"3\" or \"3:7\".",
+          },
+        ],
+      },
+      {
+        type: "group",
+        heading: "Navigation highlight",
+        items: [
+          {
+            name: "Keep temporary highlight until click",
+            desc: "When off (default), the verse highlight after navigation fades automatically after a few seconds. When on, it stays visible until you click elsewhere.",
+          },
+          {
+            name: "Max verses in hover preview",
+            desc: "Maximum number of verses to display in a range hover preview.",
+          },
+        ],
+      },
+      {
+        type: "group",
+        heading: "Hierarchical display",
+        items: [
+          {
+            name: "Show Roman parent in nested verses",
+            desc: "When on (default), nested verses display as I.1, II.3, etc., and a Roman marker immediately before its first nested verse is hidden so labels are not duplicated. When off, the Roman marker is shown and nested verses use Arabic numbers only.",
+          },
+        ],
+      },
+      {
+        type: "group",
+        heading: "Show footnotes",
+        items: [
+          {
+            name: "Show footnotes in popovers",
+            desc: "Show the footnote list at the bottom of hover previews. Footnote references in the verse text stay hoverable either way.",
+          },
+          {
+            name: "Show footnotes in embeds",
+            desc: "Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds.",
+          },
+        ],
+      },
+    ];
   }
 }

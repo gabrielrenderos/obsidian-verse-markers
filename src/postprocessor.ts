@@ -131,10 +131,7 @@ function appendVerseText(
 ): void {
   if (text.length === 0) return;
   if (isEditorialText(state)) {
-    const span = activeDocument.createElement("span");
-    span.className = "verse-editorial";
-    span.appendChild(activeDocument.createTextNode(text));
-    fragment.appendChild(span);
+    fragment.appendChild(createSpan({ cls: "verse-editorial", text }));
     return;
   }
   fragment.appendChild(activeDocument.createTextNode(text));
@@ -170,11 +167,13 @@ function appendVerseMarker(
       }
     }
     const ref = { section, number: null, part: null };
-    const markerEl = activeDocument.createElement("span");
-    markerEl.className = "verse-marker";
-    markerEl.id = verseRefToAnchorId(ref);
-    markerEl.textContent = section;
-    fragment.appendChild(markerEl);
+    fragment.appendChild(
+      createSpan({
+        cls: "verse-marker",
+        text: section,
+        attr: { id: verseRefToAnchorId(ref) },
+      })
+    );
     return;
   }
 
@@ -188,14 +187,13 @@ function appendVerseMarker(
   ) {
     ref = { section: state.currentSection, number, part };
   }
-  const markerEl = activeDocument.createElement("span");
-  markerEl.className = "verse-marker";
-  markerEl.id = verseRefToAnchorId(ref);
-  markerEl.textContent = verseRefToDisplayLabel(
-    ref,
-    renderCtx.showRomanParentInNested
+  fragment.appendChild(
+    createSpan({
+      cls: "verse-marker",
+      text: verseRefToDisplayLabel(ref, renderCtx.showRomanParentInNested),
+      attr: { id: verseRefToAnchorId(ref) },
+    })
   );
-  fragment.appendChild(markerEl);
 }
 
 type InlineToken = ProcessToken;
@@ -226,14 +224,14 @@ function processTextNode(
   if (!parent) return false;
 
   if (!hasToken) {
-    const span = activeDocument.createElement("span");
-    span.className = "verse-editorial";
-    span.appendChild(activeDocument.createTextNode(text));
-    parent.replaceChild(span, textNode);
+    parent.replaceChild(
+      createSpan({ cls: "verse-editorial", text }),
+      textNode
+    );
     return true;
   }
 
-  const fragment = activeDocument.createDocumentFragment();
+  const fragment = createFragment();
   let lastIndex = 0;
   let pos = 0;
 
@@ -404,11 +402,13 @@ function partAnchorForBlock(
  */
 function injectPartAnchor(el: HTMLElement, id: string): void {
   if (el.querySelector(`#${CSS.escape(id)}`)) return;
-  const anchor = activeDocument.createElement("span");
-  anchor.id = id;
-  anchor.className = "verse-part-anchor";
-  anchor.setAttribute("aria-hidden", "true");
-  el.insertBefore(anchor, el.firstChild);
+  el.insertBefore(
+    createSpan({
+      cls: "verse-part-anchor",
+      attr: { id, "aria-hidden": "true" },
+    }),
+    el.firstChild
+  );
 }
 
 /**

@@ -1339,8 +1339,7 @@ function wrapRangeWithSpans(
     const node = candidates[i];
     const parent = node.parentNode;
     if (!parent) continue;
-    const span = activeDocument.createElement("span");
-    span.className = className;
+    const span = createSpan({ cls: className });
     parent.insertBefore(span, node);
     span.appendChild(node);
     spans.push(span);
@@ -1494,16 +1493,16 @@ function startFlashObserver(root: ParentNode): void {
 
   const rootNode = root as Node;
   const observeTarget: Node = rootNode.instanceOf(Element)
-    ? (root as Element)
+    ? rootNode
     : rootNode.instanceOf(Document)
-      ? (root as Document).body
+      ? rootNode.body
       : rootNode;
 
   flashObserver = new MutationObserver((mutations) => {
     for (const m of mutations) {
       for (let i = 0; i < m.addedNodes.length; i++) {
         const node = m.addedNodes[i];
-        if (!(node instanceof Element)) continue;
+        if (!node.instanceOf(Element)) continue;
         if (node.id && node.id.startsWith("verse-")) {
           applyProgressiveFlash({ initial: false });
           return;

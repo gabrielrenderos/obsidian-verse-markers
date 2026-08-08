@@ -78,10 +78,8 @@ interface EmbedRegistry {
  * content lay out identically to the live note for every block type.
  */
 function wrapAsDocumentBlocks(preview: HTMLElement): void {
-  const doc = preview.ownerDocument;
   for (const child of Array.from(preview.children)) {
-    const wrapper = doc.createElement("div");
-    wrapper.className = `el-${child.tagName.toLowerCase()}`;
+    const wrapper = createDiv({ cls: `el-${child.tagName.toLowerCase()}` });
     preview.insertBefore(wrapper, child);
     wrapper.appendChild(child);
   }
