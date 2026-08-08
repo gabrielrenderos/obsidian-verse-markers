@@ -1,7 +1,7 @@
 {
   "id": "verse-markers",
   "name": "Verse Markers",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "minAppVersion": "1.4.0",
   "description": "Inline verse numbering with cross-note verse references, hover previews, and flash highlighting.",
   "author": "Gabriel Renderos",

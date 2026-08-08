@@ -1,6 +1,6 @@
 {
   "name": "verse-markers",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "Inline verse numbering with cross-note verse references, hover previews, and flash highlighting.",
   "main": "main.js",
   "scripts": {

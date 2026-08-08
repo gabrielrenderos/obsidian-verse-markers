@@ -3504,11 +3504,11 @@ var VerseMarkersSettingTab = class extends import_obsidian6.PluginSettingTab {
     );
   }
   /**
-   * Declarative index of every setting rendered by display(). Called by
-   * Obsidian 1.13.0+ once for search indexing so users can find these
-   * settings via Settings → search. Rendering stays in display(); we don't
-   * expose control types here, so the framework doesn't attempt to render
-   * from definitions and there's no risk of duplicate UI.
+   * Declarative definitions Obsidian 1.13.0+ uses to render the settings
+   * tab AND populate search. Each control's `key` names the property in
+   * `VerseMarkersSettings`; `getControlValue`/`setControlValue` bridge
+   * the framework to `plugin.settings`. On Obsidian < 1.13.0 this method
+   * is ignored and `display()` above renders imperatively.
    */
   getSettingDefinitions() {
     return [
@@ -3518,11 +3518,21 @@ var VerseMarkersSettingTab = class extends import_obsidian6.PluginSettingTab {
         items: [
           {
             name: "Enable range hover previews",
-            desc: "Show a popover with verse content when hovering over [[FILE#verse-N:M]] links."
+            desc: "Show a popover with verse content when hovering over [[FILE#verse-N:M]] links.",
+            control: {
+              key: "enableHoverPreviews",
+              type: "toggle",
+              defaultValue: DEFAULT_SETTINGS.enableHoverPreviews
+            }
           },
           {
             name: "Enable shorthand reference syntax",
-            desc: 'Recognize [[File#3]] and [[File#3:7]] in addition to the default [[File#verse-3]] form. Warning: enabling this will intercept links to headings literally named "3" or "3:7".'
+            desc: 'Recognize [[File#3]] and [[File#3:7]] in addition to the default [[File#verse-3]] form. Warning: enabling this will intercept links to headings literally named "3" or "3:7".',
+            control: {
+              key: "enableShorthandSyntax",
+              type: "toggle",
+              defaultValue: DEFAULT_SETTINGS.enableShorthandSyntax
+            }
           }
         ]
       },
@@ -3532,11 +3542,24 @@ var VerseMarkersSettingTab = class extends import_obsidian6.PluginSettingTab {
         items: [
           {
             name: "Keep temporary highlight until click",
-            desc: "When off (default), the verse highlight after navigation fades automatically after a few seconds. When on, it stays visible until you click elsewhere."
+            desc: "When off (default), the verse highlight after navigation fades automatically after a few seconds. When on, it stays visible until you click elsewhere.",
+            control: {
+              key: "keepHighlightUntilClick",
+              type: "toggle",
+              defaultValue: DEFAULT_SETTINGS.keepHighlightUntilClick
+            }
           },
           {
             name: "Max verses in hover preview",
-            desc: "Maximum number of verses to display in a range hover preview."
+            desc: "Maximum number of verses to display in a range hover preview.",
+            control: {
+              key: "hoverPreviewMaxVerses",
+              type: "number",
+              defaultValue: DEFAULT_SETTINGS.hoverPreviewMaxVerses,
+              min: 1,
+              placeholder: "20",
+              validate: (value) => Number.isFinite(value) && value > 0 ? void 0 : "Must be a positive number."
+            }
           }
         ]
       },
@@ -3546,7 +3569,12 @@ var VerseMarkersSettingTab = class extends import_obsidian6.PluginSettingTab {
         items: [
           {
             name: "Show Roman parent in nested verses",
-            desc: "When on (default), nested verses display as I.1, II.3, etc., and a Roman marker immediately before its first nested verse is hidden so labels are not duplicated. When off, the Roman marker is shown and nested verses use Arabic numbers only."
+            desc: "When on (default), nested verses display as I.1, II.3, etc., and a Roman marker immediately before its first nested verse is hidden so labels are not duplicated. When off, the Roman marker is shown and nested verses use Arabic numbers only.",
+            control: {
+              key: "showRomanParentInNestedVerses",
+              type: "toggle",
+              defaultValue: DEFAULT_SETTINGS.showRomanParentInNestedVerses
+            }
           }
         ]
       },
@@ -3556,15 +3584,43 @@ var VerseMarkersSettingTab = class extends import_obsidian6.PluginSettingTab {
         items: [
           {
             name: "Show footnotes in popovers",
-            desc: "Show the footnote list at the bottom of hover previews. Footnote references in the verse text stay hoverable either way."
+            desc: "Show the footnote list at the bottom of hover previews. Footnote references in the verse text stay hoverable either way.",
+            control: {
+              key: "showFootnotesInPopovers",
+              type: "toggle",
+              defaultValue: DEFAULT_SETTINGS.showFootnotesInPopovers
+            }
           },
           {
             name: "Show footnotes in embeds",
-            desc: "Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds."
+            desc: "Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds.",
+            control: {
+              key: "showFootnotesInEmbeds",
+              type: "toggle",
+              defaultValue: DEFAULT_SETTINGS.showFootnotesInEmbeds
+            }
           }
         ]
       }
     ];
+  }
+  /** Read a setting value the framework asks about (Obsidian 1.13.0+). */
+  getControlValue(key) {
+    return this.plugin.settings[key];
+  }
+  /**
+   * Persist a setting value the framework wrote. Triggers reading-view /
+   * embed refreshes for keys whose new value changes rendered output.
+   */
+  async setControlValue(key, value) {
+    this.plugin.settings[key] = value;
+    await this.plugin.saveSettings();
+    if (key === "showRomanParentInNestedVerses") {
+      refreshAllVerseEmbeds();
+      refreshReadingViewVerseMarkers(this.app);
+    } else if (key === "showFootnotesInEmbeds") {
+      refreshAllVerseEmbeds();
+    }
   }
 };
 
