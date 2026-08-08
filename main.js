@@ -1239,29 +1239,6 @@ function enumerateCitableRefsInSegment(text, seg) {
 function segmentIsDegenerateSingle(seg) {
   return verseRefsEqual(seg.start, seg.end);
 }
-function anchorRefIsInSegment(text, ref, seg) {
-  const hits = scanMarkers(text);
-  const startIdx = rangeStartHitIndex(hits, seg.start);
-  const endIdx = rangeEndHitIndex(hits, seg.end);
-  const hitIdx = findHitForRef(hits, ref);
-  if (startIdx === -1 || endIdx === -1 || hitIdx === -1)
-    return false;
-  if (hitIdx < startIdx || hitIdx > endIdx)
-    return false;
-  if (verseRefsEqual(ref, seg.start) && seg.start.part !== null) {
-    if (ref.part === null)
-      return false;
-    if (ref.part.charCodeAt(0) < seg.start.part.charCodeAt(0))
-      return false;
-  }
-  if (verseRefsEqual(ref, seg.end) && seg.end.part !== null) {
-    if (ref.part === null)
-      return false;
-    if (ref.part.charCodeAt(0) > seg.end.part.charCodeAt(0))
-      return false;
-  }
-  return true;
-}
 function nearestVerseRefAtOffset(text, cursorOffset) {
   const hits = scanMarkers(text);
   let best = null;
@@ -2802,16 +2779,35 @@ var FLASH_FADE_MS2 = 220;
 var FLASH_SKIP_INLINE = "h1,h2,h3,h4,h5,h6,.verse-editorial";
 var activeFlashSpans = [];
 var flashFadeTimer = null;
+var flashTargets = null;
+var wrappedFlashIds = /* @__PURE__ */ new Set();
+var flashObserver = null;
+var flashObserverRoot = null;
+function resetProgressiveFlashState() {
+  flashTargets = null;
+  wrappedFlashIds = /* @__PURE__ */ new Set();
+  flashObserverRoot = null;
+}
+function stopFlashObserver() {
+  if (flashObserver) {
+    flashObserver.disconnect();
+    flashObserver = null;
+  }
+}
 function clearReadingViewHighlight(fadeOut = true) {
+  stopFlashObserver();
   if (flashFadeTimer !== null) {
     window.clearTimeout(flashFadeTimer);
     flashFadeTimer = null;
   }
   const spans = activeFlashSpans;
-  if (spans.length === 0)
+  if (spans.length === 0) {
+    resetProgressiveFlashState();
     return;
+  }
   if (!fadeOut) {
     unwrapFlashSpans();
+    resetProgressiveFlashState();
     if (activeFlashSpans.length === 0)
       setVerseHighlightActive(false);
     return;
@@ -2821,38 +2817,26 @@ function clearReadingViewHighlight(fadeOut = true) {
   flashFadeTimer = window.setTimeout(() => {
     if (activeFlashSpans === spans) {
       unwrapFlashSpans();
+      resetProgressiveFlashState();
       setVerseHighlightActive(false);
     }
     flashFadeTimer = null;
   }, FLASH_FADE_MS2);
 }
 function flashVerseSegments(segments, root, text) {
-  const flashRanges = buildVerseFlashRanges(segments, root, text);
-  if (flashRanges.length === 0)
+  const targets = computeFlashTargetMap(segments, text);
+  if (targets.size === 0)
     return;
   clearReadingViewHighlight(false);
-  const spans = [];
-  for (const fr of flashRanges) {
-    const rangeSpans = wrapRangeWithSpans(fr.range, "verse-flash", fr.capEnd);
-    if (rangeSpans.length > 0) {
-      if (fr.capStart)
-        rangeSpans[0].classList.add("verse-flash-start");
-      if (fr.capEnd) {
-        rangeSpans[rangeSpans.length - 1].classList.add("verse-flash-end");
-      }
-    }
-    for (const span of rangeSpans)
-      spans.push(span);
-  }
-  if (spans.length === 0)
-    return;
-  activeFlashSpans = spans;
+  flashTargets = targets;
+  wrappedFlashIds = /* @__PURE__ */ new Set();
+  flashObserverRoot = root;
+  activeFlashSpans = [];
   setVerseHighlightActive(true);
-  window.requestAnimationFrame(() => {
-    for (const s of spans)
-      s.classList.add("verse-flash-active");
-    notifyVerseHighlightShown();
-  });
+  applyProgressiveFlash({ initial: true });
+  if (wrappedFlashIds.size < targets.size) {
+    startFlashObserver(root);
+  }
 }
 function wrapRangeWithSpans(range, className, trimTrailingEnd = false) {
   const spans = [];
@@ -2922,19 +2906,117 @@ function unwrapFlashSpans() {
   }
   activeFlashSpans = [];
 }
-function collectInSegmentsAnchors(segments, root, text) {
-  const all = root.querySelectorAll('[id^="verse-"]');
-  const inRange = [];
-  for (let i = 0; i < all.length; i++) {
-    const el = all[i];
-    const ref = parseVerseRefEndpoint(el.id.slice("verse-".length));
-    if (!ref)
+function computeFlashTargetMap(segments, text) {
+  const map = /* @__PURE__ */ new Map();
+  for (const seg of segments) {
+    const refs = enumerateCitableRefsInSegment(text, seg);
+    refs.forEach((ref, i) => {
+      map.set(verseRefToAnchorId(ref), {
+        capStart: i === 0,
+        capEnd: i === refs.length - 1
+      });
+    });
+  }
+  return map;
+}
+function applyProgressiveFlash(opts) {
+  if (!flashTargets || !flashObserverRoot)
+    return;
+  const root = flashObserverRoot;
+  const newSpans = [];
+  for (const [id, cap] of flashTargets) {
+    if (wrappedFlashIds.has(id))
       continue;
-    if (segments.some((seg) => anchorRefIsInSegment(text, ref, seg))) {
-      inRange.push(el);
+    const anchor = verseAnchorIn(root, id);
+    if (!anchor)
+      continue;
+    const range = buildFlashRangeForAnchor(anchor, root, cap);
+    if (!range)
+      continue;
+    const rangeSpans = wrapRangeWithSpans(range.range, "verse-flash", range.capEnd);
+    wrappedFlashIds.add(id);
+    if (rangeSpans.length === 0)
+      continue;
+    if (range.capStart)
+      rangeSpans[0].classList.add("verse-flash-start");
+    if (range.capEnd) {
+      rangeSpans[rangeSpans.length - 1].classList.add("verse-flash-end");
+    }
+    for (const span of rangeSpans) {
+      newSpans.push(span);
+      activeFlashSpans.push(span);
     }
   }
-  return inRange;
+  if (newSpans.length > 0) {
+    window.requestAnimationFrame(() => {
+      for (const s of newSpans)
+        s.classList.add("verse-flash-active");
+      if (opts.initial)
+        notifyVerseHighlightShown();
+    });
+  } else if (opts.initial) {
+    notifyVerseHighlightShown();
+  }
+  if (flashTargets && wrappedFlashIds.size >= flashTargets.size) {
+    stopFlashObserver();
+  }
+}
+function buildFlashRangeForAnchor(anchor, root, cap) {
+  var _a;
+  const all = root.querySelectorAll('[id^="verse-"]');
+  let nextAnchor = null;
+  let foundSelf = false;
+  for (let i = 0; i < all.length; i++) {
+    if (all[i] === anchor) {
+      foundSelf = true;
+      continue;
+    }
+    if (foundSelf && parseVerseRefEndpoint(all[i].id.slice("verse-".length))) {
+      nextAnchor = all[i];
+      break;
+    }
+  }
+  const range = activeDocument.createRange();
+  try {
+    range.setStartBefore(anchor);
+    const stop = findFlashStopBetween(anchor, nextAnchor, cap.capEnd, root);
+    if (stop) {
+      range.setEndBefore(stop);
+    } else if (nextAnchor) {
+      range.setEndBefore(nextAnchor);
+    } else {
+      const last = root.instanceOf(Element) ? (_a = root.lastElementChild) != null ? _a : root.lastChild : root.lastChild;
+      if (!last)
+        return null;
+      range.setEndAfter(last);
+    }
+    return { range, capStart: cap.capStart, capEnd: cap.capEnd };
+  } catch (e) {
+    return null;
+  }
+}
+function startFlashObserver(root) {
+  stopFlashObserver();
+  const rootNode = root;
+  const observeTarget = rootNode.instanceOf(Element) ? root : rootNode.instanceOf(Document) ? root.body : rootNode;
+  flashObserver = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      for (let i = 0; i < m.addedNodes.length; i++) {
+        const node = m.addedNodes[i];
+        if (!(node instanceof Element))
+          continue;
+        if (node.id && node.id.startsWith("verse-")) {
+          applyProgressiveFlash({ initial: false });
+          return;
+        }
+        if (node.querySelector && node.querySelector('[id^="verse-"]')) {
+          applyProgressiveFlash({ initial: false });
+          return;
+        }
+      }
+    }
+  });
+  flashObserver.observe(observeTarget, { childList: true, subtree: true });
 }
 var FLASH_STOP_FOOTNOTE_SELECTORS = [
   "section.footnotes",
@@ -2956,57 +3038,6 @@ function findFlashStopBetween(a, b, includeHeadings, root) {
     return el;
   }
   return null;
-}
-function buildVerseFlashRanges(segments, root, text) {
-  var _a;
-  const inRange = collectInSegmentsAnchors(segments, root, text);
-  if (inRange.length === 0)
-    return [];
-  const allValidAnchors = [];
-  const all = root.querySelectorAll('[id^="verse-"]');
-  for (let i = 0; i < all.length; i++) {
-    const ref = parseVerseRefEndpoint(all[i].id.slice("verse-".length));
-    if (ref)
-      allValidAnchors.push(all[i]);
-  }
-  const inRangeSet = new Set(inRange);
-  const ranges = [];
-  for (const anchor of inRange) {
-    const idx = allValidAnchors.indexOf(anchor);
-    const next = idx >= 0 ? allValidAnchors[idx + 1] : void 0;
-    const prev = idx > 0 ? allValidAnchors[idx - 1] : void 0;
-    const nextInSelection = next !== void 0 && inRangeSet.has(next);
-    const prevInSelection = prev !== void 0 && inRangeSet.has(prev);
-    const includeHeadings = !nextInSelection;
-    const range = activeDocument.createRange();
-    try {
-      range.setStartBefore(anchor);
-      const stop = findFlashStopBetween(
-        anchor,
-        next != null ? next : null,
-        includeHeadings,
-        root
-      );
-      if (stop) {
-        range.setEndBefore(stop);
-      } else if (next) {
-        range.setEndBefore(next);
-      } else {
-        const last = root.instanceOf(Element) ? (_a = root.lastElementChild) != null ? _a : root.lastChild : root.lastChild;
-        if (!last)
-          continue;
-        range.setEndAfter(last);
-      }
-      ranges.push({
-        range,
-        capStart: !prevInSelection,
-        capEnd: !nextInSelection
-      });
-    } catch (e) {
-      continue;
-    }
-  }
-  return ranges;
 }
 
 // src/embeds.ts

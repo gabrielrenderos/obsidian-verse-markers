@@ -43,7 +43,6 @@ import {
   parseVerseSegments,
   parseVerseRefEndpoint,
   partHasAnchorByRef,
-  anchorRefIsInSegment,
   segmentIsDegenerateSingle,
   getSourceStartForRef,
   verseBlockquotePrefixByRef,
@@ -1194,18 +1193,56 @@ const FLASH_SKIP_INLINE = "h1,h2,h3,h4,h5,h6,.verse-editorial";
 let activeFlashSpans: HTMLSpanElement[] = [];
 let flashFadeTimer: number | null = null;
 
+/** Cap flags precomputed per target anchor ID (independent of DOM mount state). */
+interface FlashTargetInfo {
+  capStart: boolean;
+  capEnd: boolean;
+}
+
+/**
+ * Progressive-flash state. Reading view is virtualized, so targets outside
+ * the viewport aren't in the DOM when the link is clicked. We precompute
+ * every target's anchor ID + cap flags from the source text (mount-order
+ * independent) and use a MutationObserver on the preview root to wrap each
+ * target as it mounts. `wrappedFlashIds` tracks which targets have already
+ * been wrapped so scroll-driven remounts don't re-wrap them.
+ */
+let flashTargets: Map<string, FlashTargetInfo> | null = null;
+let wrappedFlashIds: Set<string> = new Set();
+let flashObserver: MutationObserver | null = null;
+let flashObserverRoot: ParentNode | null = null;
+
+function resetProgressiveFlashState(): void {
+  flashTargets = null;
+  wrappedFlashIds = new Set();
+  flashObserverRoot = null;
+}
+
+function stopFlashObserver(): void {
+  if (flashObserver) {
+    flashObserver.disconnect();
+    flashObserver = null;
+  }
+}
+
 /** Removes the reading-view verse highlight (optional fade-out). */
 export function clearReadingViewHighlight(fadeOut = true): void {
+  stopFlashObserver();
+
   if (flashFadeTimer !== null) {
     window.clearTimeout(flashFadeTimer);
     flashFadeTimer = null;
   }
 
   const spans = activeFlashSpans;
-  if (spans.length === 0) return;
+  if (spans.length === 0) {
+    resetProgressiveFlashState();
+    return;
+  }
 
   if (!fadeOut) {
     unwrapFlashSpans();
+    resetProgressiveFlashState();
     if (activeFlashSpans.length === 0) setVerseHighlightActive(false);
     return;
   }
@@ -1215,6 +1252,7 @@ export function clearReadingViewHighlight(fadeOut = true): void {
   flashFadeTimer = window.setTimeout(() => {
     if (activeFlashSpans === spans) {
       unwrapFlashSpans();
+      resetProgressiveFlashState();
       setVerseHighlightActive(false);
     }
     flashFadeTimer = null;
@@ -1223,37 +1261,33 @@ export function clearReadingViewHighlight(fadeOut = true): void {
 
 /**
  * Highlights in-range verse text in reading view via wrapped spans.
+ *
+ * Wraps every target anchor that is currently mounted, then installs a
+ * MutationObserver on the preview root so late-mounting anchors (targets
+ * outside the initial viewport in a virtualized reading view) get wrapped
+ * as they appear during scroll.
  */
 function flashVerseSegments(
   segments: VerseSegment[],
   root: ParentNode,
   text: string
 ): void {
-  const flashRanges = buildVerseFlashRanges(segments, root, text);
-  if (flashRanges.length === 0) return;
+  const targets = computeFlashTargetMap(segments, text);
+  if (targets.size === 0) return;
 
   clearReadingViewHighlight(false);
 
-  const spans: HTMLSpanElement[] = [];
-  for (const fr of flashRanges) {
-    const rangeSpans = wrapRangeWithSpans(fr.range, "verse-flash", fr.capEnd);
-    if (rangeSpans.length > 0) {
-      if (fr.capStart) rangeSpans[0].classList.add("verse-flash-start");
-      if (fr.capEnd) {
-        rangeSpans[rangeSpans.length - 1].classList.add("verse-flash-end");
-      }
-    }
-    for (const span of rangeSpans) spans.push(span);
-  }
-  if (spans.length === 0) return;
+  flashTargets = targets;
+  wrappedFlashIds = new Set();
+  flashObserverRoot = root;
+  activeFlashSpans = [];
 
-  activeFlashSpans = spans;
   setVerseHighlightActive(true);
+  applyProgressiveFlash({ initial: true });
 
-  window.requestAnimationFrame(() => {
-    for (const s of spans) s.classList.add("verse-flash-active");
-    notifyVerseHighlightShown();
-  });
+  if (wrappedFlashIds.size < targets.size) {
+    startFlashObserver(root);
+  }
 }
 
 function wrapRangeWithSpans(
@@ -1327,22 +1361,161 @@ function unwrapFlashSpans(): void {
   activeFlashSpans = [];
 }
 
-function collectInSegmentsAnchors(
+/**
+ * Precomputes per-anchor cap flags from segments + source text. Each
+ * segment produces a run of consecutive citable refs; the first ref gets
+ * capStart=true, the last gets capEnd=true. Cap flags don't depend on DOM
+ * state, so late-mounted targets get the correct rounding regardless of
+ * the order in which they appear.
+ */
+function computeFlashTargetMap(
   segments: VerseSegment[],
-  root: ParentNode,
   text: string
-): HTMLElement[] {
-  const all = root.querySelectorAll<HTMLElement>('[id^="verse-"]');
-  const inRange: HTMLElement[] = [];
-  for (let i = 0; i < all.length; i++) {
-    const el = all[i];
-    const ref = parseVerseRefEndpoint(el.id.slice("verse-".length));
-    if (!ref) continue;
-    if (segments.some((seg) => anchorRefIsInSegment(text, ref, seg))) {
-      inRange.push(el);
+): Map<string, FlashTargetInfo> {
+  const map = new Map<string, FlashTargetInfo>();
+  for (const seg of segments) {
+    const refs = enumerateCitableRefsInSegment(text, seg);
+    refs.forEach((ref, i) => {
+      map.set(verseRefToAnchorId(ref), {
+        capStart: i === 0,
+        capEnd: i === refs.length - 1,
+      });
+    });
+  }
+  return map;
+}
+
+/**
+ * Wraps every target that is currently mounted and not yet wrapped. Runs
+ * once from `flashVerseSegments` and again from the MutationObserver each
+ * time a new verse anchor appears. Disconnects the observer once every
+ * target has been wrapped.
+ */
+function applyProgressiveFlash(opts: { initial: boolean }): void {
+  if (!flashTargets || !flashObserverRoot) return;
+  const root = flashObserverRoot;
+
+  const newSpans: HTMLSpanElement[] = [];
+  for (const [id, cap] of flashTargets) {
+    if (wrappedFlashIds.has(id)) continue;
+    const anchor = verseAnchorIn(root, id);
+    if (!anchor) continue;
+
+    const range = buildFlashRangeForAnchor(anchor, root, cap);
+    if (!range) continue;
+
+    const rangeSpans = wrapRangeWithSpans(range.range, "verse-flash", range.capEnd);
+    wrappedFlashIds.add(id);
+    if (rangeSpans.length === 0) continue;
+
+    if (range.capStart) rangeSpans[0].classList.add("verse-flash-start");
+    if (range.capEnd) {
+      rangeSpans[rangeSpans.length - 1].classList.add("verse-flash-end");
+    }
+    for (const span of rangeSpans) {
+      newSpans.push(span);
+      activeFlashSpans.push(span);
     }
   }
-  return inRange;
+
+  if (newSpans.length > 0) {
+    window.requestAnimationFrame(() => {
+      for (const s of newSpans) s.classList.add("verse-flash-active");
+      if (opts.initial) notifyVerseHighlightShown();
+    });
+  } else if (opts.initial) {
+    notifyVerseHighlightShown();
+  }
+
+  if (flashTargets && wrappedFlashIds.size >= flashTargets.size) {
+    stopFlashObserver();
+  }
+}
+
+/**
+ * Builds one FlashRange for a mounted anchor: from the anchor to the next
+ * flash stop (heading/footnote) or the next verse anchor in DOM order, or
+ * end of the preview root. Same stop rules as the pre-fix per-anchor
+ * loop, but takes cap flags in directly so it works without a full-set
+ * DOM sweep.
+ */
+function buildFlashRangeForAnchor(
+  anchor: HTMLElement,
+  root: ParentNode,
+  cap: FlashTargetInfo
+): FlashRange | null {
+  const all = root.querySelectorAll<HTMLElement>('[id^="verse-"]');
+  let nextAnchor: HTMLElement | null = null;
+  let foundSelf = false;
+  for (let i = 0; i < all.length; i++) {
+    if (all[i] === anchor) {
+      foundSelf = true;
+      continue;
+    }
+    if (
+      foundSelf &&
+      parseVerseRefEndpoint(all[i].id.slice("verse-".length))
+    ) {
+      nextAnchor = all[i];
+      break;
+    }
+  }
+
+  const range = activeDocument.createRange();
+  try {
+    range.setStartBefore(anchor);
+    const stop = findFlashStopBetween(anchor, nextAnchor, cap.capEnd, root);
+    if (stop) {
+      range.setEndBefore(stop);
+    } else if (nextAnchor) {
+      range.setEndBefore(nextAnchor);
+    } else {
+      const last = (root as Node).instanceOf(Element)
+        ? (root as Element).lastElementChild ?? root.lastChild
+        : root.lastChild;
+      if (!last) return null;
+      range.setEndAfter(last);
+    }
+    return { range, capStart: cap.capStart, capEnd: cap.capEnd };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Watches the preview root for verse anchors that mount after the flash
+ * started (targets outside the initial viewport in Obsidian's virtualized
+ * reading view). Only reacts to added nodes that are — or contain — a
+ * `[id^="verse-"]` element, so our own wrap-span insertions don't trigger
+ * a re-run.
+ */
+function startFlashObserver(root: ParentNode): void {
+  stopFlashObserver();
+
+  const rootNode = root as Node;
+  const observeTarget: Node = rootNode.instanceOf(Element)
+    ? (root as Element)
+    : rootNode.instanceOf(Document)
+      ? (root as Document).body
+      : rootNode;
+
+  flashObserver = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      for (let i = 0; i < m.addedNodes.length; i++) {
+        const node = m.addedNodes[i];
+        if (!(node instanceof Element)) continue;
+        if (node.id && node.id.startsWith("verse-")) {
+          applyProgressiveFlash({ initial: false });
+          return;
+        }
+        if (node.querySelector && node.querySelector('[id^="verse-"]')) {
+          applyProgressiveFlash({ initial: false });
+          return;
+        }
+      }
+    }
+  });
+  flashObserver.observe(observeTarget, { childList: true, subtree: true });
 }
 
 /**
@@ -1404,92 +1577,9 @@ function findFlashStopBetween(
   return null;
 }
 
-/**
 /** A flash range plus whether it begins/ends a contiguous highlighted run. */
 interface FlashRange {
   range: Range;
   capStart: boolean;
   capEnd: boolean;
-}
-
-/**
- * Builds DOM Ranges that cover the text of each verse belonging to the
- * reference's segments: from the verse's anchor element up to (but not
- * including) the next verse anchor in the document. The final in-range verse
- * extends to end-of-document.
- *
- * Disjoint support: membership is tested against ALL segments, so verses in a
- * gap (7 in 4:6/8:10) are skipped — and because each in-range verse stops at
- * the very next anchor (which, before a gap, is the excluded verse), the
- * excluded text is never highlighted. Each range is tagged capStart/capEnd
- * when it begins/ends a contiguous run, so the caller rounds only the true
- * outer edges of each highlighted block.
- *
- * Heading clamp: when the verse AFTER the current anchor is NOT itself in the
- * selection (a trailing edge of a run), the range stops before any heading
- * between the two anchors. For interior verses, headings stay inside the range
- * so heading-split verses (parts b, c, …) still highlight fully.
- */
-function buildVerseFlashRanges(
-  segments: VerseSegment[],
-  root: ParentNode,
-  text: string
-): FlashRange[] {
-  const inRange = collectInSegmentsAnchors(segments, root, text);
-  if (inRange.length === 0) return [];
-
-  const allValidAnchors: HTMLElement[] = [];
-  const all = root.querySelectorAll<HTMLElement>('[id^="verse-"]');
-  for (let i = 0; i < all.length; i++) {
-    const ref = parseVerseRefEndpoint(all[i].id.slice("verse-".length));
-    if (ref) allValidAnchors.push(all[i]);
-  }
-
-  const inRangeSet = new Set<HTMLElement>(inRange);
-
-  const ranges: FlashRange[] = [];
-  for (const anchor of inRange) {
-    const idx = allValidAnchors.indexOf(anchor);
-    const next = idx >= 0 ? allValidAnchors[idx + 1] : undefined;
-    const prev = idx > 0 ? allValidAnchors[idx - 1] : undefined;
-    const nextInSelection = next !== undefined && inRangeSet.has(next);
-    const prevInSelection = prev !== undefined && inRangeSet.has(prev);
-
-    // Headings act as a stop only when the selection does NOT continue
-    // into the next anchor (i.e. this is the trailing edge of a run). When
-    // it does continue (heading-split parts), headings stay inside the
-    // highlight. Footnotes are always a stop.
-    const includeHeadings = !nextInSelection;
-
-    const range = activeDocument.createRange();
-    try {
-      range.setStartBefore(anchor);
-      const stop = findFlashStopBetween(
-        anchor,
-        next ?? null,
-        includeHeadings,
-        root
-      );
-      if (stop) {
-        range.setEndBefore(stop);
-      } else if (next) {
-        range.setEndBefore(next);
-      } else {
-        const last = (root as Node).instanceOf(Element)
-          ? (root as Element).lastElementChild ?? root.lastChild
-          : root.lastChild;
-        if (!last) continue;
-        range.setEndAfter(last);
-      }
-      ranges.push({
-        range,
-        capStart: !prevInSelection,
-        capEnd: !nextInSelection,
-      });
-    } catch {
-      // setStart/setEnd can throw on detached nodes; just skip.
-      continue;
-    }
-  }
-  return ranges;
 }
