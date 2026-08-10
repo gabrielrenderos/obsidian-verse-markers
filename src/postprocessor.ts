@@ -9,6 +9,7 @@
 import { App, MarkdownPostProcessorContext, MarkdownView } from "obsidian";
 import {
   charOffsetForLine,
+  getFileLines,
   hasVerseMarker,
   isVerseBreakLine,
   isSectionFlowBreakLine,
@@ -388,7 +389,7 @@ function partAnchorForBlock(
 
   // If the block itself contains a verse marker, its own marker carries the
   // "verse-N" id — no extra injection needed for part a.
-  const sourceLines = info.text.split("\n");
+  const sourceLines = getFileLines(info.text);
   const blockText = sourceLines.slice(info.lineStart, info.lineEnd + 1).join("\n");
   if (hasVerseMarker(blockText)) return null;
 
@@ -421,8 +422,7 @@ function hideVerseBreakBlock(
 ): void {
   const info = ctx.getSectionInfo(el);
   if (!info) return;
-  const blockText = info.text
-    .split("\n")
+  const blockText = getFileLines(info.text)
     .slice(info.lineStart, info.lineEnd + 1)
     .join("\n");
   if (!isVerseBreakLine(blockText) && !isSectionFlowBreakLine(blockText)) return;
@@ -452,16 +452,18 @@ export function versePostProcessor(
   let blockText = "";
   let sectionInfo: ReturnType<MarkdownPostProcessorContext["getSectionInfo"]> =
     null;
+  let blockStartOffset: number | undefined;
 
   if (ctx) {
     sectionInfo = ctx.getSectionInfo(el);
     if (sectionInfo) {
-      const lines = sectionInfo.text.split("\n");
+      const lines = getFileLines(sectionInfo.text);
       blockText = lines.slice(sectionInfo.lineStart, sectionInfo.lineEnd + 1).join("\n");
-      state = verseProcessStateAt(
+      blockStartOffset = charOffsetForLine(
         sectionInfo.text,
-        charOffsetForLine(sectionInfo.text, sectionInfo.lineStart)
+        sectionInfo.lineStart
       );
+      state = verseProcessStateAt(sectionInfo.text, blockStartOffset);
     }
   }
 
@@ -476,9 +478,7 @@ export function versePostProcessor(
   const renderCtx: MarkerRenderContext = {
     showRomanParentInNested: getShowRomanParentInNestedVerses(),
     sourceText: sectionInfo?.text,
-    sourceOffset: sectionInfo
-      ? charOffsetForLine(sectionInfo.text, sectionInfo.lineStart)
-      : undefined,
+    sourceOffset: blockStartOffset,
   };
   let sourceCursor = renderCtx.sourceOffset ?? 0;
 

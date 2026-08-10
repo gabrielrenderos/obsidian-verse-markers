@@ -33,7 +33,7 @@ import {
 } from "./highlightDismiss";
 import { registerNativeFlashPrevention } from "./nativeFlash";
 import { clearReadingViewHighlight } from "./references";
-import { parseVerseRefEndpoint } from "./detection";
+import { clearFileIndexCache, parseVerseRefEndpoint } from "./detection";
 import {
   VerseMarkersSettings,
   DEFAULT_SETTINGS,
@@ -103,6 +103,10 @@ export default class VerseMarkersPlugin extends Plugin {
       const fragment = `verse-${verse}`;
       await resolveVerseLink(this.app, file, fragment);
     });
+  }
+
+  onunload(): void {
+    clearFileIndexCache();
   }
 
   async loadSettings(): Promise<void> {

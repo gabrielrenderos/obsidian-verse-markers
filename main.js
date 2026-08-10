@@ -148,6 +148,9 @@ function nextRawMarkerToken(text, from) {
   };
 }
 function scanMarkers(text) {
+  return getFileIndex(text).markerHits;
+}
+function scanMarkersImpl(text) {
   const hits = [];
   let pos = 0;
   let currentSection = null;
@@ -542,30 +545,85 @@ function applyProcessToken(state, tok) {
 function charOffsetForLine(text, lineIndex) {
   if (lineIndex <= 0)
     return 0;
-  let line = 0;
-  for (let i = 0; i < text.length; i++) {
-    if (line === lineIndex)
-      return i;
-    if (text[i] === "\n")
-      line++;
+  const index = getFileIndex(text);
+  return lineIndex < index.lineOffsets.length ? index.lineOffsets[lineIndex] : text.length;
+}
+var FILE_INDEX_CACHE_CAP = 10;
+var fileIndexCache = /* @__PURE__ */ new Map();
+function cloneVerseProcessState(state) {
+  return {
+    ...state,
+    resumableRef: state.resumableRef ? { ...state.resumableRef } : null,
+    openVerseRef: state.openVerseRef ? { ...state.openVerseRef } : null
+  };
+}
+function buildFileIndex(text) {
+  const lines = text.split("\n");
+  const lineOffsets = new Array(lines.length);
+  lineOffsets[0] = 0;
+  for (let i = 1; i < lines.length; i++) {
+    lineOffsets[i] = lineOffsets[i - 1] + lines[i - 1].length + 1;
   }
-  return text.length;
+  const tokenStates = [];
+  const state = defaultVerseProcessState();
+  let pos = 0;
+  while (pos < text.length) {
+    const tok = nextProcessToken(text, pos);
+    if (!tok)
+      break;
+    applyProcessToken(state, tok);
+    tokenStates.push({
+      startIndex: tok.index,
+      state: cloneVerseProcessState(state)
+    });
+    pos = tok.index + tok.length;
+  }
+  const markerHits = scanMarkersImpl(text);
+  return { lineOffsets, lines, tokenStates, markerHits };
+}
+function getFileLines(text) {
+  return getFileIndex(text).lines;
+}
+function getFileIndex(text) {
+  const cached = fileIndexCache.get(text);
+  if (cached) {
+    fileIndexCache.delete(text);
+    fileIndexCache.set(text, cached);
+    return cached;
+  }
+  const built = buildFileIndex(text);
+  fileIndexCache.set(text, built);
+  if (fileIndexCache.size > FILE_INDEX_CACHE_CAP) {
+    const oldestKey = fileIndexCache.keys().next().value;
+    if (oldestKey !== void 0)
+      fileIndexCache.delete(oldestKey);
+  }
+  return built;
+}
+function clearFileIndexCache() {
+  fileIndexCache.clear();
 }
 function isFollowedByFootnoteRef(text, markerEnd) {
   return /^ \[/.test(text.slice(markerEnd));
 }
 function verseProcessStateAt(text, endOffset) {
-  const state = defaultVerseProcessState();
-  let pos = 0;
-  const limit = Math.min(endOffset, text.length);
-  while (pos < limit) {
-    const tok = nextProcessToken(text, pos, limit);
-    if (!tok)
-      break;
-    applyProcessToken(state, tok);
-    pos = tok.index + tok.length;
+  const index = getFileIndex(text);
+  const trace = index.tokenStates;
+  if (trace.length === 0)
+    return defaultVerseProcessState();
+  const target = Math.min(endOffset, text.length);
+  let lo = 0;
+  let hi = trace.length;
+  while (lo < hi) {
+    const mid = lo + hi >>> 1;
+    if (trace[mid].startIndex < target)
+      lo = mid + 1;
+    else
+      hi = mid;
   }
-  return state;
+  if (lo === 0)
+    return defaultVerseProcessState();
+  return cloneVerseProcessState(trace[lo - 1].state);
 }
 function stripBlockquoteMarker(line) {
   return line.replace(/^\s*>\s?/, "");
@@ -1100,7 +1158,8 @@ function findVerseLineByRef(text, ref) {
   return line;
 }
 function continuationPartAnchor(text, blockStartLine) {
-  const lines = text.split("\n");
+  const lines = getFileLines(text);
+  const hits = scanMarkers(text);
   let headingCount = 0;
   let verseRef = null;
   for (let i = blockStartLine - 1; i >= 0; i--) {
@@ -1113,7 +1172,7 @@ function continuationPartAnchor(text, blockStartLine) {
     }
     const lineStart = charOffsetForLine(text, i);
     const lineEnd = lineStart + lines[i].length;
-    const hit = scanMarkers(text).find(
+    const hit = hits.find(
       (h) => isCitableHit(h) && h.index >= lineStart && h.index < lineEnd
     );
     if (hit) {
@@ -1477,7 +1536,7 @@ function partAnchorForBlock(el, ctx) {
   const info = ctx.getSectionInfo(el);
   if (!info)
     return null;
-  const sourceLines = info.text.split("\n");
+  const sourceLines = getFileLines(info.text);
   const blockText = sourceLines.slice(info.lineStart, info.lineEnd + 1).join("\n");
   if (hasVerseMarker(blockText))
     return null;
@@ -1498,7 +1557,7 @@ function hideVerseBreakBlock(el, ctx) {
   const info = ctx.getSectionInfo(el);
   if (!info)
     return;
-  const blockText = info.text.split("\n").slice(info.lineStart, info.lineEnd + 1).join("\n");
+  const blockText = getFileLines(info.text).slice(info.lineStart, info.lineEnd + 1).join("\n");
   if (!isVerseBreakLine(blockText) && !isSectionFlowBreakLine(blockText))
     return;
   el.addClass("verse-break");
@@ -1513,15 +1572,17 @@ function versePostProcessor(el, ctx) {
   let state = defaultVerseProcessState();
   let blockText = "";
   let sectionInfo = null;
+  let blockStartOffset;
   if (ctx) {
     sectionInfo = ctx.getSectionInfo(el);
     if (sectionInfo) {
-      const lines = sectionInfo.text.split("\n");
+      const lines = getFileLines(sectionInfo.text);
       blockText = lines.slice(sectionInfo.lineStart, sectionInfo.lineEnd + 1).join("\n");
-      state = verseProcessStateAt(
+      blockStartOffset = charOffsetForLine(
         sectionInfo.text,
-        charOffsetForLine(sectionInfo.text, sectionInfo.lineStart)
+        sectionInfo.lineStart
       );
+      state = verseProcessStateAt(sectionInfo.text, blockStartOffset);
     }
   }
   if (isEditorialContinuationBlock(blockText, state)) {
@@ -1536,7 +1597,7 @@ function versePostProcessor(el, ctx) {
   const renderCtx = {
     showRomanParentInNested: getShowRomanParentInNestedVerses(),
     sourceText: sectionInfo == null ? void 0 : sectionInfo.text,
-    sourceOffset: sectionInfo ? charOffsetForLine(sectionInfo.text, sectionInfo.lineStart) : void 0
+    sourceOffset: blockStartOffset
   };
   let sourceCursor = (_a = renderCtx.sourceOffset) != null ? _a : 0;
   const textNodes = collectTextNodes(el);
@@ -3660,6 +3721,9 @@ var VerseMarkersPlugin = class extends import_obsidian7.Plugin {
       const fragment = `verse-${verse}`;
       await resolveVerseLink(this.app, file, fragment);
     });
+  }
+  onunload() {
+    clearFileIndexCache();
   }
   async loadSettings() {
     const data = await this.loadData();

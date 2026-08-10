@@ -219,8 +219,16 @@ export function nextRawMarkerToken(text: string, from: number): RawMarkerToken |
  * Scans every verse marker in `text` in document order. Auto-detects hierarchy
  * when any Roman section marker is present (no extra pass). Respects `[///]`
  * structured-flow breaks after the first Roman marker.
+ *
+ * Result is cached per file via `getFileIndex` — the ~20 callers across this
+ * module get an O(1) cache hit after the first scan of a given text.
  */
 function scanMarkers(text: string): MarkerHit[] {
+  return getFileIndex(text).markerHits;
+}
+
+/** Actual marker-scan implementation. Called once per file by `buildFileIndex`. */
+function scanMarkersImpl(text: string): MarkerHit[] {
   const hits: MarkerHit[] = [];
   let pos = 0;
   let currentSection: string | null = null;
@@ -772,12 +780,105 @@ export function applyProcessToken(
 /** Character offset at the start of `lineIndex` (0-based) in `text`. */
 export function charOffsetForLine(text: string, lineIndex: number): number {
   if (lineIndex <= 0) return 0;
-  let line = 0;
-  for (let i = 0; i < text.length; i++) {
-    if (line === lineIndex) return i;
-    if (text[i] === "\n") line++;
+  const index = getFileIndex(text);
+  return lineIndex < index.lineOffsets.length
+    ? index.lineOffsets[lineIndex]
+    : text.length;
+}
+
+/**
+ * Per-file cache of every O(N) computation the reading-view postprocessor
+ * used to redo on every block mount: line-start offsets, the split-lines
+ * array, the full VerseProcessState after every token, and the hierarchy-
+ * aware marker-hit list. Built lazily on first lookup of a given text
+ * string and reused across every subsequent query for the same file. Any
+ * edit produces a new text string, so the next lookup builds a fresh
+ * index; stale entries fall out of the LRU below.
+ */
+interface FileIndex {
+  /** `lineOffsets[i]` is the char offset where line `i` starts (line 0 = 0). */
+  lineOffsets: number[];
+  /** Cached `text.split("\n")` — one-time cost, shared by every caller. */
+  lines: string[];
+  /** State after each token, in source order — for binary-search state lookups. */
+  tokenStates: Array<{ startIndex: number; state: VerseProcessState }>;
+  /** Result of `scanMarkersImpl(text)` — feeds every `scanMarkers` call. */
+  markerHits: MarkerHit[];
+}
+
+/**
+ * LRU-ordered file-index cache. Maps use insertion order for iteration;
+ * we re-insert on hit to move an entry to "most recently used" and drop
+ * the first (oldest) entry when the cap is exceeded.
+ */
+const FILE_INDEX_CACHE_CAP = 10;
+const fileIndexCache = new Map<string, FileIndex>();
+
+function cloneVerseProcessState(state: VerseProcessState): VerseProcessState {
+  return {
+    ...state,
+    resumableRef: state.resumableRef ? { ...state.resumableRef } : null,
+    openVerseRef: state.openVerseRef ? { ...state.openVerseRef } : null,
+  };
+}
+
+function buildFileIndex(text: string): FileIndex {
+  const lines = text.split("\n");
+  const lineOffsets: number[] = new Array<number>(lines.length);
+  lineOffsets[0] = 0;
+  for (let i = 1; i < lines.length; i++) {
+    lineOffsets[i] = lineOffsets[i - 1] + lines[i - 1].length + 1;
   }
-  return text.length;
+
+  const tokenStates: Array<{ startIndex: number; state: VerseProcessState }> =
+    [];
+  const state = defaultVerseProcessState();
+  let pos = 0;
+  while (pos < text.length) {
+    const tok = nextProcessToken(text, pos);
+    if (!tok) break;
+    applyProcessToken(state, tok);
+    tokenStates.push({
+      startIndex: tok.index,
+      state: cloneVerseProcessState(state),
+    });
+    pos = tok.index + tok.length;
+  }
+
+  const markerHits = scanMarkersImpl(text);
+
+  return { lineOffsets, lines, tokenStates, markerHits };
+}
+
+/**
+ * Cached `text.split("\n")`. Prefer this over calling split directly for
+ * per-block work: the postprocessor path uses it four times per mount,
+ * each of which was an O(N) file scan; now they share one build.
+ */
+export function getFileLines(text: string): string[] {
+  return getFileIndex(text).lines;
+}
+
+function getFileIndex(text: string): FileIndex {
+  const cached = fileIndexCache.get(text);
+  if (cached) {
+    fileIndexCache.delete(text);
+    fileIndexCache.set(text, cached);
+    return cached;
+  }
+
+  const built = buildFileIndex(text);
+  fileIndexCache.set(text, built);
+  if (fileIndexCache.size > FILE_INDEX_CACHE_CAP) {
+    const oldestKey = fileIndexCache.keys().next().value;
+    if (oldestKey !== undefined) fileIndexCache.delete(oldestKey);
+  }
+  return built;
+}
+
+/** Release cached indexes. Call from plugin `onunload()`. */
+export function clearFileIndexCache(): void {
+  fileIndexCache.clear();
 }
 
 /**
@@ -795,23 +896,35 @@ export function isFollowedByFootnoteRef(
 }
 
 /**
- * Verse/editorial toggle state in `text` immediately before `endOffset`, by
- * scanning `[N]` markers and `[//]` breaks from the start of the file.
+ * Verse/editorial toggle state in `text` immediately before `endOffset`.
+ *
+ * Backed by the per-file cache: builds a one-time token/state trace on the
+ * first call for a given file, then answers every subsequent query with a
+ * binary search over that trace. Turns the reading-view postprocessor's
+ * old O(N)-per-block state calc into O(log N) after the first block.
  */
 export function verseProcessStateAt(
   text: string,
   endOffset: number
 ): VerseProcessState {
-  const state = defaultVerseProcessState();
-  let pos = 0;
-  const limit = Math.min(endOffset, text.length);
-  while (pos < limit) {
-    const tok = nextProcessToken(text, pos, limit);
-    if (!tok) break;
-    applyProcessToken(state, tok);
-    pos = tok.index + tok.length;
+  const index = getFileIndex(text);
+  const trace = index.tokenStates;
+  if (trace.length === 0) return defaultVerseProcessState();
+
+  // Match the old scan semantics: apply every token whose start index is
+  // strictly less than `endOffset`. Binary-search the largest such i and
+  // return the state right after that token.
+  const target = Math.min(endOffset, text.length);
+  let lo = 0;
+  let hi = trace.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (trace[mid].startIndex < target) lo = mid + 1;
+    else hi = mid;
   }
-  return state;
+
+  if (lo === 0) return defaultVerseProcessState();
+  return cloneVerseProcessState(trace[lo - 1].state);
 }
 
 /** Strips one level of leading "> " blockquote marker from a line. */
@@ -1806,7 +1919,8 @@ export function continuationPartAnchor(
   text: string,
   blockStartLine: number
 ): string | null {
-  const lines = text.split("\n");
+  const lines = getFileLines(text);
+  const hits = scanMarkers(text);
   let headingCount = 0;
   let verseRef: VerseRef | null = null;
   for (let i = blockStartLine - 1; i >= 0; i--) {
@@ -1818,7 +1932,7 @@ export function continuationPartAnchor(
     }
     const lineStart = charOffsetForLine(text, i);
     const lineEnd = lineStart + lines[i].length;
-    const hit = scanMarkers(text).find(
+    const hit = hits.find(
       (h) =>
         isCitableHit(h) &&
         h.index >= lineStart &&
