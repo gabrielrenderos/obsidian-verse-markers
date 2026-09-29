@@ -264,8 +264,11 @@ Prefix any reference with `!` to transclude it inline instead of linking to it:
 | `![[File#verse-3:7]]`       | Verses 3–7, inline                                 |
 | `![[File#verse-4:6/8:10]]`  | Disjoint range, inline (7 excluded)                |
 | `![[File#verse-3a]]`        | A single authored/derived part, inline             |
+| `![[File#verse-3:7!]]`      | Verses 3–7, inline, without footnotes              |
 
 The embed renders as a native-style card — a file-name title (the same bold `embed-title` styling Obsidian uses for whole-file embeds) plus the verse content — and the corner icon opens the source note at the cited verse. It works in **both reading view and Live Preview**.
+
+**Footnotes.** Embeds include the footnote references and footnote list of the cited verses while **Show footnotes in embeds** is on (the default). To leave them out of a single embed, end its reference with `!` — `![[File#verse-3:7!]]`. The flag works with every reference form (`verse-3!`, `verse-4:6/8:10!`, shorthand `3:7!`) and only ever removes footnotes: with the setting off, embeds show none either way. It applies to embeds only, so drop it if you turn the embed back into a plain link.
 
 Obsidian's built-in transclusion can only resolve fragments that name a real heading or block, so it can't render `verse-` fragments on its own; the plugin hooks Obsidian's embed pipeline to fill these embeds itself. A `|display text` alias on an embed is ignored — the title is always the file name.
 
@@ -322,6 +325,7 @@ obsidian://verse-markers?file=Notes/Gospel%20of%20John.md&verse=3&part=a
 | Enable shorthand reference syntax         | Off     | Also accept `[[File#3]]` / `[[File#3:7]]`. See collision warning.   |
 | Keep temporary highlight until click        | Off     | Navigation highlight auto-fades after ~2s; on = stays until click.  |
 | Show Roman parent in nested verses          | On      | In sectioned notes: nested labels use the section prefix (`I.1`); a section marker immediately before its first nested verse is hidden. Off = show the section marker and plain nested labels (`1`, `2`, …). A section with no nested verses always shows the section marker. |
+| Show footnotes in embeds                  | On      | Footnote references and the footnote list in verse embeds. To omit them from a single embed, end its reference with `!` (`![[File#verse-3:7!]]`). |
 
 ## Styling
 

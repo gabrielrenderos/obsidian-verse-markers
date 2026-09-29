@@ -3103,6 +3103,7 @@ function findFlashStopBetween(a, b, includeHeadings, root) {
 // src/embeds.ts
 var import_obsidian5 = require("obsidian");
 var verseEmbedInstances = /* @__PURE__ */ new Set();
+var OMIT_FOOTNOTES_FLAG = "!";
 function refreshAllVerseEmbeds() {
   for (const embed of verseEmbedInstances) {
     void embed.reload();
@@ -3116,12 +3117,13 @@ function wrapAsDocumentBlocks(preview) {
   }
 }
 var VerseEmbed = class extends import_obsidian5.Component {
-  constructor(plugin, ctx, file, fragment) {
+  constructor(plugin, ctx, file, fragment, omitFootnotes) {
     super();
     this.plugin = plugin;
     this.ctx = ctx;
     this.file = file;
     this.fragment = fragment;
+    this.omitFootnotes = omitFootnotes;
     this.renderToken = 0;
   }
   onload() {
@@ -3148,7 +3150,7 @@ var VerseEmbed = class extends import_obsidian5.Component {
         this.file,
         segments,
         this.plugin.settings.hoverPreviewMaxVerses,
-        this.plugin.settings.showFootnotesInEmbeds,
+        this.plugin.settings.showFootnotesInEmbeds && !this.omitFootnotes,
         this.plugin.settings.showRomanParentInNestedVerses
       );
     }
@@ -3220,14 +3222,17 @@ function registerVerseEmbeds(plugin) {
     if (typeof original !== "function")
       return;
     const creator = (ctx, file, subpath) => {
-      const fragment = (subpath != null ? subpath : "").replace(/^#/, "");
+      const target = (subpath != null ? subpath : "").replace(/^#/, "");
+      const omitFootnotes = target.endsWith(OMIT_FOOTNOTES_FLAG);
+      const fragment = omitFootnotes ? target.slice(0, -OMIT_FOOTNOTES_FLAG.length) : target;
       if (fragment) {
         const segments = parseVerseSegments(
           fragment,
           plugin.settings.enableShorthandSyntax
         );
-        if (segments)
-          return new VerseEmbed(plugin, ctx, file, fragment);
+        if (segments) {
+          return new VerseEmbed(plugin, ctx, file, fragment, omitFootnotes);
+        }
       }
       return original(ctx, file, subpath);
     };
@@ -3555,7 +3560,7 @@ var VerseMarkersSettingTab = class extends import_obsidian6.PluginSettingTab {
       })
     );
     new import_obsidian6.Setting(containerEl).setName("Show footnotes in embeds").setDesc(
-      "Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds."
+      'Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds. To omit footnotes from a single embed, end its reference with "!" (e.g. ![[File#verse-3:7!]]).'
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.showFootnotesInEmbeds).onChange(async (value) => {
         this.plugin.settings.showFootnotesInEmbeds = value;
@@ -3654,7 +3659,7 @@ var VerseMarkersSettingTab = class extends import_obsidian6.PluginSettingTab {
           },
           {
             name: "Show footnotes in embeds",
-            desc: "Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds.",
+            desc: 'Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds. To omit footnotes from a single embed, end its reference with "!" (e.g. ![[File#verse-3:7!]]).',
             control: {
               key: "showFootnotesInEmbeds",
               type: "toggle",

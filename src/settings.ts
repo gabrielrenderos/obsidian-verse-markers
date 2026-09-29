@@ -173,7 +173,8 @@ export class VerseMarkersSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Show footnotes in embeds")
       .setDesc(
-        "Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds."
+        "Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds. " +
+          "To omit footnotes from a single embed, end its reference with \"!\" (e.g. ![[File#verse-3:7!]])."
       )
       .addToggle((toggle) =>
         toggle
@@ -279,7 +280,7 @@ export class VerseMarkersSettingTab extends PluginSettingTab {
           },
           {
             name: "Show footnotes in embeds",
-            desc: "Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds.",
+            desc: "Show footnote references and the footnote list in verse embeds. When off, no footnote content appears in embeds. To omit footnotes from a single embed, end its reference with \"!\" (e.g. ![[File#verse-3:7!]]).",
             control: {
               key: "showFootnotesInEmbeds",
               type: "toggle",

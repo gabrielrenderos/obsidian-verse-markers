@@ -31,6 +31,15 @@ import type VerseMarkersPlugin from "./main";
 
 const verseEmbedInstances = new Set<VerseEmbed>();
 
+/**
+ * Trailing flag that omits footnotes from a single embed: ![[File#verse-3:7!]].
+ * It lives in the subpath, not the `|alias`, because Live Preview applies the
+ * alias only after creating the embed (and reuses the embed when just the
+ * alias changes). No verse fragment can end in "!", so unflagged fragments
+ * parse exactly as before.
+ */
+const OMIT_FOOTNOTES_FLAG = "!";
+
 /** Re-render every verse embed on the current page (e.g. after settings change). */
 export function refreshAllVerseEmbeds(): void {
   for (const embed of verseEmbedInstances) {
@@ -99,7 +108,8 @@ class VerseEmbed extends Component {
     private readonly plugin: VerseMarkersPlugin,
     private readonly ctx: EmbedContext,
     private readonly file: TFile,
-    private readonly fragment: string
+    private readonly fragment: string,
+    private readonly omitFootnotes: boolean
   ) {
     super();
   }
@@ -134,7 +144,7 @@ class VerseEmbed extends Component {
         this.file,
         segments,
         this.plugin.settings.hoverPreviewMaxVerses,
-        this.plugin.settings.showFootnotesInEmbeds,
+        this.plugin.settings.showFootnotesInEmbeds && !this.omitFootnotes,
         this.plugin.settings.showRomanParentInNestedVerses
       );
     }
@@ -248,13 +258,19 @@ export function registerVerseEmbeds(plugin: VerseMarkersPlugin): void {
     if (typeof original !== "function") return;
 
     const creator: EmbedCreator = (ctx, file, subpath) => {
-      const fragment = (subpath ?? "").replace(/^#/, "");
+      const target = (subpath ?? "").replace(/^#/, "");
+      const omitFootnotes = target.endsWith(OMIT_FOOTNOTES_FLAG);
+      const fragment = omitFootnotes
+        ? target.slice(0, -OMIT_FOOTNOTES_FLAG.length)
+        : target;
       if (fragment) {
         const segments = parseVerseSegments(
           fragment,
           plugin.settings.enableShorthandSyntax
         );
-        if (segments) return new VerseEmbed(plugin, ctx, file, fragment);
+        if (segments) {
+          return new VerseEmbed(plugin, ctx, file, fragment, omitFootnotes);
+        }
       }
       return original(ctx, file, subpath);
     };
