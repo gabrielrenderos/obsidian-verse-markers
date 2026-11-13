@@ -337,7 +337,7 @@ The plugin intentionally does **not** ship custom colors, weights, or sizes beyo
 .verse-marker { color: var(--link-color); }              /* reading view + LP accents */
 .verse-marker-bracket { color: var(--text-faint); }      /* Live Preview: [//] / [///] brackets */
 .verse-hover-preview mark,
-.verse-embed mark { background-color: var(--text-highlight-bg); }  /* == in popovers/embeds */
+.verse-embed mark { background-color: var(--highlight-background, var(--text-highlight-bg)); }  /* == in popovers/embeds */
 ```
 
 **Live Preview:** Obsidian's native handling of `[N]` (light-gray brackets, accent-colored digits) is left alone outside highlights. Section markers (`[I]`, …) and pause/break tokens (`[//]`, `[///]`) are always decorated explicitly (muted `[` `]`, accent label) because Obsidian does not style them natively.

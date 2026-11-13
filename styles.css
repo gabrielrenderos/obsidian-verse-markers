@@ -9,6 +9,12 @@
  * via CM6 marks (livePreview.ts); reading view drops brackets.
  *
  * Reading view always drops brackets and shows only the accent-colored label.
+ *
+ * Highlight fills use `--highlight-background`, the color Obsidian paints
+ * `==highlights==` and its own scroll flash with. Newer Obsidian defines it
+ * (honoring a theme's `--text-highlight-bg`) and no longer defines
+ * `--text-highlight-bg` itself, so a bare `var(--text-highlight-bg)` is
+ * transparent there; older versions define only `--text-highlight-bg`.
  */
 
 /* Verse label (reading view, popover/embed, and LP label accent). */
@@ -35,7 +41,7 @@
   transition: background-color 220ms ease-in-out;
 }
 .markdown-source-view.mod-cm6 .verse-marker-widget.verse-flash-cm-active {
-  background-color: var(--text-highlight-bg);
+  background-color: var(--highlight-background, var(--text-highlight-bg));
 }
 .markdown-source-view.mod-cm6 .verse-marker-widget.verse-flash-cm-start {
   border-top-left-radius: 0.18em;
@@ -85,7 +91,7 @@
 /* Popover + embed: theme highlight fill on <mark> from convertHighlightSyntaxToHtml. */
 .verse-hover-preview mark,
 .verse-embed mark {
-  background-color: var(--text-highlight-bg);
+  background-color: var(--highlight-background, var(--text-highlight-bg));
   color: var(--text-normal);
 }
 
@@ -217,7 +223,7 @@
   margin-right: -0.1em;
 }
 .verse-flash-active {
-  background-color: var(--text-highlight-bg);
+  background-color: var(--highlight-background, var(--text-highlight-bg));
 }
 
 /* Live Preview: navigation flash via CM6 mark decorations (flashLivePreview.ts). */
@@ -234,7 +240,7 @@
   transition: background-color 220ms ease-in-out;
 }
 .markdown-source-view.mod-cm6 .verse-flash-cm-active {
-  background-color: var(--text-highlight-bg);
+  background-color: var(--highlight-background, var(--text-highlight-bg));
 }
 /* Marker color spans inside a flash run must not paint their own fill. */
 .markdown-source-view.mod-cm6 .verse-flash-cm .verse-marker,
