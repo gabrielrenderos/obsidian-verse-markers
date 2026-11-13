@@ -43,13 +43,14 @@ import {
   parseVerseSegments,
   parseVerseRefEndpoint,
   partHasAnchorByRef,
+  readingAnchorIdForRef,
+  readingAnchorIdsInSegment,
   segmentIsDegenerateSingle,
   getSourceStartForRef,
   verseBlockquotePrefixByRef,
   verseRefToAnchorId,
   verseRefToLabel,
   verseRefToDisplayLabel,
-  verseRefsEqual,
   flatVerseRef,
   type VerseRef,
   type VerseSegment,
@@ -152,11 +153,17 @@ function buildRangeCore(
 
   const blocks: string[] = [];
   let versesUsed = 0;
-  for (const ref of enumerateCitableRefsInSegment(content, seg)) {
+  const refs = enumerateCitableRefsInSegment(content, seg);
+  for (let i = 0; i < refs.length; i++) {
     if (versesUsed >= maxVerses) break;
+    const ref = refs[i];
 
-    const trimStart = verseRefsEqual(ref, start) && start.part !== null;
-    const trimEnd = verseRefsEqual(ref, end) && end.part !== null;
+    // The first/last refs are the endpoint markers. An endpoint part trims a
+    // plain [N] verse to its heading/footnote parts; an authored [Nb] marker
+    // already IS that part, so it renders whole.
+    const trimStart = i === 0 && start.part !== null && ref.part === null;
+    const trimEnd =
+      i === refs.length - 1 && end.part !== null && ref.part === null;
 
     let verseText: string | null;
     let label = verseRefToDisplayLabel(ref, showRomanParentInNested);
@@ -943,7 +950,7 @@ export async function resolveVerseLink(
   const navStart = flashSegments[0].start;
 
   const targetLine = findVerseLineByRef(content, navStart);
-  const primaryId = verseRefToAnchorId(navStart);
+  const primaryId = readingAnchorIdForRef(content, navStart);
   const firstPart = firstFragmentPartByRef(content, {
     ...navStart,
     part: null,
@@ -1362,10 +1369,11 @@ function unwrapFlashSpans(): void {
 
 /**
  * Precomputes per-anchor cap flags from segments + source text. Each
- * segment produces a run of consecutive citable refs; the first ref gets
- * capStart=true, the last gets capEnd=true. Cap flags don't depend on DOM
- * state, so late-mounted targets get the correct rounding regardless of
- * the order in which they appear.
+ * segment produces a run of consecutive anchors — verse markers plus the
+ * part anchors of heading-split verses; the first gets capStart=true, the
+ * last gets capEnd=true. Cap flags don't depend on DOM state, so
+ * late-mounted targets get the correct rounding regardless of the order in
+ * which they appear.
  */
 function computeFlashTargetMap(
   segments: VerseSegment[],
@@ -1373,11 +1381,11 @@ function computeFlashTargetMap(
 ): Map<string, FlashTargetInfo> {
   const map = new Map<string, FlashTargetInfo>();
   for (const seg of segments) {
-    const refs = enumerateCitableRefsInSegment(text, seg);
-    refs.forEach((ref, i) => {
-      map.set(verseRefToAnchorId(ref), {
+    const ids = readingAnchorIdsInSegment(text, seg);
+    ids.forEach((id, i) => {
+      map.set(id, {
         capStart: i === 0,
-        capEnd: i === refs.length - 1,
+        capEnd: i === ids.length - 1,
       });
     });
   }

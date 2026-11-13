@@ -417,6 +417,30 @@ function findHitForRef(hits: MarkerHit[], ref: VerseRef): number {
   return hits.findIndex((h) => refMatchesHit(ref, h));
 }
 
+/**
+ * Index of the marker that carries `ref`. A part ref first matches an authored
+ * marker with that exact part ([3b]); failing that, the letter names a
+ * heading/footnote-derived part of the verse's plain [N] marker, so it
+ * resolves to that marker. -1 when neither exists.
+ */
+function findHitForPartRef(hits: MarkerHit[], ref: VerseRef): number {
+  const exact = findHitForRef(hits, ref);
+  if (exact !== -1 || ref.part === null) return exact;
+  const base: VerseRef = { ...ref, part: null };
+  return hits.findIndex((h) => h.part === null && refMatchesHit(base, h));
+}
+
+/**
+ * Part index (0 = "a") that `ref` names among the derived parts of `hit`, the
+ * marker it resolved to — or null when `ref` has no part, or an authored
+ * marker carries it (that marker already IS the part).
+ */
+function derivedPartIndex(ref: VerseRef, hit: MarkerHit): number | null {
+  return ref.part !== null && hit.part === null
+    ? partToIndex(ref.part)
+    : null;
+}
+
 /** Parses one endpoint: `3`, `3a`, `I`, `I.3`, `I.3a`. */
 export function parseVerseRefEndpoint(endpoint: string): VerseRef | null {
   const child = /^([IVXLCDM]+)\.(\d+)([a-z]*)$/.exec(endpoint);
@@ -465,14 +489,14 @@ function rangeStartHitIndex(hits: MarkerHit[], ref: VerseRef): number {
       (h) => h.kind === "section" && h.section === ref.section
     );
   }
-  return findHitForRef(hits, ref);
+  return findHitForPartRef(hits, ref);
 }
 
 function rangeEndHitIndex(hits: MarkerHit[], ref: VerseRef): number {
   if (ref.number === null) {
     return lastHitIndexInSection(hits, ref.section!);
   }
-  return findHitForRef(hits, ref);
+  return findHitForPartRef(hits, ref);
 }
 
 function contentEndBeforeNextHit(
@@ -1146,6 +1170,116 @@ function splitVerseParts(rawContent: string): string[] {
   return versePartSegments(rawContent).flat();
 }
 
+/**
+ * One heading-delimited segment of a plain [N] verse, located in the source.
+ * Reading view anchors only a segment's first part: part "a" through the
+ * marker span, each later segment through an injected `verse-Nb`/… span.
+ */
+interface DerivedSegment {
+  /** Part index (0 = "a") of the segment's first part. */
+  firstPart: number;
+  /** Parts in the segment (interior footnotes add sub-parts). */
+  partCount: number;
+  /** Where the segment's text begins (the marker, for the first segment). */
+  from: number;
+  /** Where it ends: the heading line that closes it, or the verse end. */
+  to: number;
+}
+
+/**
+ * Splits the plain marker at `hitIndex` into its heading-delimited segments.
+ * Part letters come from `versePartSegments` over the same raw span, so they
+ * stay in lockstep with `continuationPartAnchor` and `partHasAnchorByRef`.
+ */
+function derivedSegments(
+  text: string,
+  hits: MarkerHit[],
+  hitIndex: number
+): DerivedSegment[] {
+  const hit = hits[hitIndex];
+  if (text[hit.afterMarker] !== " ") return [];
+  const spanStart = hit.afterMarker + 1;
+  const spanEnd =
+    hitIndex + 1 < hits.length ? hits[hitIndex + 1].index : text.length;
+  const raw = text.slice(spanStart, spanEnd);
+  const partCounts = versePartSegments(raw).map((parts) => parts.length);
+
+  const segments: DerivedSegment[] = [];
+  let firstPart = 0;
+  let from: number | null = hit.index;
+  let lineStart = spanStart;
+  for (const line of raw.split("\n")) {
+    const stripped = stripBlockquoteMarker(line);
+    if (HEADING_LINE_REGEX.test(stripped)) {
+      const partCount = partCounts[segments.length] ?? 1;
+      segments.push({
+        firstPart,
+        partCount,
+        from: from ?? lineStart,
+        to: lineStart,
+      });
+      firstPart += partCount;
+      from = null;
+    } else if (from === null && /\S/.test(stripped)) {
+      // First content line after the heading, past any `>` / indent lead-in.
+      from = lineStart + (/^[\s>]*/.exec(line)?.[0].length ?? 0);
+    }
+    lineStart += line.length + 1;
+  }
+  segments.push({
+    firstPart,
+    partCount: partCounts[segments.length] ?? 1,
+    from: from ?? spanEnd,
+    to: spanEnd,
+  });
+  return segments;
+}
+
+/** The segment holding part index `partIndex`, or null when out of range. */
+function derivedSegmentForPart(
+  segments: DerivedSegment[],
+  partIndex: number
+): DerivedSegment | null {
+  return (
+    segments.find(
+      (s) => partIndex >= s.firstPart && partIndex < s.firstPart + s.partCount
+    ) ?? null
+  );
+}
+
+/** Part letter for a zero-based part index (0 → "a"). */
+function partLetter(index: number): string {
+  return String.fromCharCode(97 + index);
+}
+
+/**
+ * Source bounds that derived start/end parts trim the plain marker at
+ * `hitIndex` to: from the start of the segment holding `startRef`'s part to
+ * the end of the one holding `endRef`'s. Null when neither names a derived
+ * part of this marker. Segment granularity matches what reading view can
+ * highlight (interior footnote parts have no anchor of their own).
+ */
+function derivedPartBounds(
+  text: string,
+  hits: MarkerHit[],
+  hitIndex: number,
+  startRef: VerseRef | null,
+  endRef: VerseRef | null
+): { from: number; to: number } | null {
+  const hit = hits[hitIndex];
+  const first = startRef ? derivedPartIndex(startRef, hit) : null;
+  const last = endRef ? derivedPartIndex(endRef, hit) : null;
+  if (first === null && last === null) return null;
+  const segments = derivedSegments(text, hits, hitIndex);
+  const startSeg =
+    first !== null ? derivedSegmentForPart(segments, first) : null;
+  const endSeg = last !== null ? derivedSegmentForPart(segments, last) : null;
+  return {
+    from: startSeg?.from ?? hit.index,
+    to: endSeg?.to ?? text.length,
+  };
+}
+
 function findVerseSpanByRef(
   text: string,
   ref: VerseRef
@@ -1376,7 +1510,28 @@ export function getVerseFlashRuns(
       const marker = markerTokenRangeForRef(text, ref);
       const flashFrom = marker?.from ?? span.start;
       const spanEnd = flashSpanEndForVerseRef(text, span, hits, i, seg);
-      parts.push(...verseModeSourceIntervals(text, flashFrom, spanEnd));
+      const intervals = verseModeSourceIntervals(text, flashFrom, spanEnd);
+      // A heading-split start/end part narrows this verse to the segments it
+      // names. Toggles are resolved over the whole verse first, so `[//]`
+      // gaps before the cut still count.
+      const bounds = derivedPartBounds(
+        text,
+        hits,
+        i,
+        i === startIdx ? seg.start : null,
+        i === endIdx ? seg.end : null
+      );
+      if (!bounds) {
+        parts.push(...intervals);
+        continue;
+      }
+      for (const r of intervals) {
+        const from = Math.max(r.from, bounds.from);
+        const to = Math.min(r.to, bounds.to);
+        if (to > from && /\S/.test(text.slice(from, to))) {
+          parts.push({ from, to });
+        }
+      }
     }
 
     const ranges = mergeAdjacentSourceRanges(parts);
@@ -1591,7 +1746,7 @@ export function verseBlockquotePrefixByRef(
   ref: VerseRef
 ): string {
   const hits = scanMarkers(text);
-  const idx = findHitForRef(hits, ref);
+  const idx = findHitForPartRef(hits, ref);
   if (idx === -1 || !isCitableHit(hits[idx])) return "";
   const markerIndex = hits[idx].index;
   const lineStart = text.lastIndexOf("\n", markerIndex - 1) + 1;
@@ -1882,12 +2037,81 @@ export function findVerseLineByRef(
   const hits = scanMarkers(text);
   const idx = rangeStartHitIndex(hits, ref);
   if (idx === -1) return null;
-  const markerIndex = hits[idx].index;
+  let offset = hits[idx].index;
+  // A heading-split part starts on the first line after its heading, which
+  // can sit far below the marker: target that line so its block mounts.
+  const partIndex = derivedPartIndex(ref, hits[idx]);
+  if (partIndex !== null) {
+    const segment = derivedSegmentForPart(
+      derivedSegments(text, hits, idx),
+      partIndex
+    );
+    if (segment) offset = segment.from;
+  }
   let line = 0;
-  for (let i = 0; i < markerIndex; i++) {
+  for (let i = 0; i < offset; i++) {
     if (text.charCodeAt(i) === 10) line++;
   }
   return line;
+}
+
+/**
+ * Reading-view element id where `ref` begins — `verseRefToAnchorId`, except
+ * for part "a" of a heading-split plain [N] verse: no anchor is injected for
+ * it, because the marker span (`verse-N`) already marks where it begins.
+ */
+export function readingAnchorIdForRef(text: string, ref: VerseRef): string {
+  if (ref.part === "a" && ref.number !== null) {
+    const hits = scanMarkers(text);
+    const idx = findHitForPartRef(hits, ref);
+    if (idx !== -1 && derivedPartIndex(ref, hits[idx]) !== null) {
+      return verseRefToAnchorId({ ...ref, part: null });
+    }
+  }
+  return verseRefToAnchorId(ref);
+}
+
+/**
+ * Reading-view anchor ids a segment covers, in document order: each marker's
+ * span, plus the injected `verse-Nb`/`verse-Nc`/… anchors that open the later
+ * heading segments of a plain [N] verse. A heading-split start/end part trims
+ * the first/last verse to the segments holding the parts it names.
+ */
+export function readingAnchorIdsInSegment(
+  text: string,
+  seg: VerseSegment
+): string[] {
+  const hits = scanMarkers(text);
+  const startIdx = rangeStartHitIndex(hits, seg.start);
+  const endIdx = rangeEndHitIndex(hits, seg.end);
+  if (startIdx === -1 || endIdx === -1 || startIdx > endIdx) return [];
+
+  const ids: string[] = [];
+  for (let i = startIdx; i <= endIdx; i++) {
+    const hit = hits[i];
+    if (!isCitableHit(hit)) continue;
+    const ref = hitToRef(hit);
+    if (!ref) continue;
+    const segments = hit.part === null ? derivedSegments(text, hits, i) : [];
+    if (segments.length === 0) {
+      ids.push(verseRefToAnchorId(ref));
+      continue;
+    }
+    const first =
+      (i === startIdx ? derivedPartIndex(seg.start, hit) : null) ?? 0;
+    const last =
+      (i === endIdx ? derivedPartIndex(seg.end, hit) : null) ?? Infinity;
+    for (const s of segments) {
+      if (s.firstPart + s.partCount <= first) continue;
+      if (s.firstPart > last) break;
+      ids.push(
+        verseRefToAnchorId(
+          s.firstPart === 0 ? ref : { ...ref, part: partLetter(s.firstPart) }
+        )
+      );
+    }
+  }
+  return ids;
 }
 
 /**

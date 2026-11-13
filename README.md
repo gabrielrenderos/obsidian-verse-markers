@@ -308,6 +308,8 @@ obsidian://verse-markers?file=<vault-relative-path>&verse=<N>&part=<letter>
 
 `verse` may also include the part directly (`verse=5a`); the separate `part` is a convenience for the plain-number form.
 
+`file` is matched the way Obsidian's own `obsidian://open` links match it: a vault-relative path, or just the note name (any letter case, `.md` optional). If no note matches, a notice says so.
+
 Example:
 
 ```

@@ -294,6 +294,16 @@ function refMatchesHit(ref, hit) {
 function findHitForRef(hits, ref) {
   return hits.findIndex((h) => refMatchesHit(ref, h));
 }
+function findHitForPartRef(hits, ref) {
+  const exact = findHitForRef(hits, ref);
+  if (exact !== -1 || ref.part === null)
+    return exact;
+  const base = { ...ref, part: null };
+  return hits.findIndex((h) => h.part === null && refMatchesHit(base, h));
+}
+function derivedPartIndex(ref, hit) {
+  return ref.part !== null && hit.part === null ? partToIndex(ref.part) : null;
+}
 function parseVerseRefEndpoint(endpoint) {
   const child = /^([IVXLCDM]+)\.(\d+)([a-z]*)$/.exec(endpoint);
   if (child && isValidRomanSection(child[1])) {
@@ -337,13 +347,13 @@ function rangeStartHitIndex(hits, ref) {
       (h) => h.kind === "section" && h.section === ref.section
     );
   }
-  return findHitForRef(hits, ref);
+  return findHitForPartRef(hits, ref);
 }
 function rangeEndHitIndex(hits, ref) {
   if (ref.number === null) {
     return lastHitIndexInSection(hits, ref.section);
   }
-  return findHitForRef(hits, ref);
+  return findHitForPartRef(hits, ref);
 }
 function contentEndBeforeNextHit(text, hits, hitIndex) {
   const nextIdx = hitIndex + 1;
@@ -779,6 +789,68 @@ function versePartSegments(rawContent) {
 function splitVerseParts(rawContent) {
   return versePartSegments(rawContent).flat();
 }
+function derivedSegments(text, hits, hitIndex) {
+  var _a, _b, _c, _d;
+  const hit = hits[hitIndex];
+  if (text[hit.afterMarker] !== " ")
+    return [];
+  const spanStart = hit.afterMarker + 1;
+  const spanEnd = hitIndex + 1 < hits.length ? hits[hitIndex + 1].index : text.length;
+  const raw = text.slice(spanStart, spanEnd);
+  const partCounts = versePartSegments(raw).map((parts) => parts.length);
+  const segments = [];
+  let firstPart = 0;
+  let from = hit.index;
+  let lineStart = spanStart;
+  for (const line of raw.split("\n")) {
+    const stripped = stripBlockquoteMarker(line);
+    if (HEADING_LINE_REGEX.test(stripped)) {
+      const partCount = (_a = partCounts[segments.length]) != null ? _a : 1;
+      segments.push({
+        firstPart,
+        partCount,
+        from: from != null ? from : lineStart,
+        to: lineStart
+      });
+      firstPart += partCount;
+      from = null;
+    } else if (from === null && /\S/.test(stripped)) {
+      from = lineStart + ((_c = (_b = /^[\s>]*/.exec(line)) == null ? void 0 : _b[0].length) != null ? _c : 0);
+    }
+    lineStart += line.length + 1;
+  }
+  segments.push({
+    firstPart,
+    partCount: (_d = partCounts[segments.length]) != null ? _d : 1,
+    from: from != null ? from : spanEnd,
+    to: spanEnd
+  });
+  return segments;
+}
+function derivedSegmentForPart(segments, partIndex) {
+  var _a;
+  return (_a = segments.find(
+    (s) => partIndex >= s.firstPart && partIndex < s.firstPart + s.partCount
+  )) != null ? _a : null;
+}
+function partLetter(index) {
+  return String.fromCharCode(97 + index);
+}
+function derivedPartBounds(text, hits, hitIndex, startRef, endRef) {
+  var _a, _b;
+  const hit = hits[hitIndex];
+  const first = startRef ? derivedPartIndex(startRef, hit) : null;
+  const last = endRef ? derivedPartIndex(endRef, hit) : null;
+  if (first === null && last === null)
+    return null;
+  const segments = derivedSegments(text, hits, hitIndex);
+  const startSeg = first !== null ? derivedSegmentForPart(segments, first) : null;
+  const endSeg = last !== null ? derivedSegmentForPart(segments, last) : null;
+  return {
+    from: (_a = startSeg == null ? void 0 : startSeg.from) != null ? _a : hit.index,
+    to: (_b = endSeg == null ? void 0 : endSeg.to) != null ? _b : text.length
+  };
+}
 function findVerseSpanByRef(text, ref) {
   const hits = scanMarkers(text);
   const idx = findHitForRef(hits, ref);
@@ -903,7 +975,25 @@ function getVerseFlashRuns(text, segments) {
       const marker = markerTokenRangeForRef(text, ref);
       const flashFrom = (_a = marker == null ? void 0 : marker.from) != null ? _a : span.start;
       const spanEnd = flashSpanEndForVerseRef(text, span, hits, i, seg);
-      parts.push(...verseModeSourceIntervals(text, flashFrom, spanEnd));
+      const intervals = verseModeSourceIntervals(text, flashFrom, spanEnd);
+      const bounds = derivedPartBounds(
+        text,
+        hits,
+        i,
+        i === startIdx ? seg.start : null,
+        i === endIdx ? seg.end : null
+      );
+      if (!bounds) {
+        parts.push(...intervals);
+        continue;
+      }
+      for (const r of intervals) {
+        const from = Math.max(r.from, bounds.from);
+        const to = Math.min(r.to, bounds.to);
+        if (to > from && /\S/.test(text.slice(from, to))) {
+          parts.push({ from, to });
+        }
+      }
     }
     const ranges = mergeAdjacentSourceRanges(parts);
     if (ranges.length === 0)
@@ -1000,7 +1090,7 @@ function getVerseContentByRef(text, ref) {
 }
 function verseBlockquotePrefixByRef(text, ref) {
   const hits = scanMarkers(text);
-  const idx = findHitForRef(hits, ref);
+  const idx = findHitForPartRef(hits, ref);
   if (idx === -1 || !isCitableHit(hits[idx]))
     return "";
   const markerIndex = hits[idx].index;
@@ -1149,13 +1239,68 @@ function findVerseLineByRef(text, ref) {
   const idx = rangeStartHitIndex(hits, ref);
   if (idx === -1)
     return null;
-  const markerIndex = hits[idx].index;
+  let offset = hits[idx].index;
+  const partIndex = derivedPartIndex(ref, hits[idx]);
+  if (partIndex !== null) {
+    const segment = derivedSegmentForPart(
+      derivedSegments(text, hits, idx),
+      partIndex
+    );
+    if (segment)
+      offset = segment.from;
+  }
   let line = 0;
-  for (let i = 0; i < markerIndex; i++) {
+  for (let i = 0; i < offset; i++) {
     if (text.charCodeAt(i) === 10)
       line++;
   }
   return line;
+}
+function readingAnchorIdForRef(text, ref) {
+  if (ref.part === "a" && ref.number !== null) {
+    const hits = scanMarkers(text);
+    const idx = findHitForPartRef(hits, ref);
+    if (idx !== -1 && derivedPartIndex(ref, hits[idx]) !== null) {
+      return verseRefToAnchorId({ ...ref, part: null });
+    }
+  }
+  return verseRefToAnchorId(ref);
+}
+function readingAnchorIdsInSegment(text, seg) {
+  var _a, _b;
+  const hits = scanMarkers(text);
+  const startIdx = rangeStartHitIndex(hits, seg.start);
+  const endIdx = rangeEndHitIndex(hits, seg.end);
+  if (startIdx === -1 || endIdx === -1 || startIdx > endIdx)
+    return [];
+  const ids = [];
+  for (let i = startIdx; i <= endIdx; i++) {
+    const hit = hits[i];
+    if (!isCitableHit(hit))
+      continue;
+    const ref = hitToRef(hit);
+    if (!ref)
+      continue;
+    const segments = hit.part === null ? derivedSegments(text, hits, i) : [];
+    if (segments.length === 0) {
+      ids.push(verseRefToAnchorId(ref));
+      continue;
+    }
+    const first = (_a = i === startIdx ? derivedPartIndex(seg.start, hit) : null) != null ? _a : 0;
+    const last = (_b = i === endIdx ? derivedPartIndex(seg.end, hit) : null) != null ? _b : Infinity;
+    for (const s of segments) {
+      if (s.firstPart + s.partCount <= first)
+        continue;
+      if (s.firstPart > last)
+        break;
+      ids.push(
+        verseRefToAnchorId(
+          s.firstPart === 0 ? ref : { ...ref, part: partLetter(s.firstPart) }
+        )
+      );
+    }
+  }
+  return ids;
 }
 function continuationPartAnchor(text, blockStartLine) {
   const lines = getFileLines(text);
@@ -2239,11 +2384,13 @@ function buildRangeCore(content, seg, maxVerses, showRomanParentInNested) {
   }
   const blocks = [];
   let versesUsed = 0;
-  for (const ref of enumerateCitableRefsInSegment(content, seg)) {
+  const refs = enumerateCitableRefsInSegment(content, seg);
+  for (let i = 0; i < refs.length; i++) {
     if (versesUsed >= maxVerses)
       break;
-    const trimStart = verseRefsEqual(ref, start) && start.part !== null;
-    const trimEnd = verseRefsEqual(ref, end) && end.part !== null;
+    const ref = refs[i];
+    const trimStart = i === 0 && start.part !== null && ref.part === null;
+    const trimEnd = i === refs.length - 1 && end.part !== null && ref.part === null;
     let verseText;
     let label = verseRefToDisplayLabel(ref, showRomanParentInNested);
     if (trimStart || trimEnd) {
@@ -2710,7 +2857,7 @@ async function resolveVerseLink(app, file, fragment, allowShorthand = false, opt
   }));
   const navStart = flashSegments[0].start;
   const targetLine = findVerseLineByRef(content, navStart);
-  const primaryId = verseRefToAnchorId(navStart);
+  const primaryId = readingAnchorIdForRef(content, navStart);
   const firstPart = firstFragmentPartByRef(content, {
     ...navStart,
     part: null
@@ -2969,11 +3116,11 @@ function unwrapFlashSpans() {
 function computeFlashTargetMap(segments, text) {
   const map = /* @__PURE__ */ new Map();
   for (const seg of segments) {
-    const refs = enumerateCitableRefsInSegment(text, seg);
-    refs.forEach((ref, i) => {
-      map.set(verseRefToAnchorId(ref), {
+    const ids = readingAnchorIdsInSegment(text, seg);
+    ids.forEach((id, i) => {
+      map.set(id, {
         capStart: i === 0,
-        capEnd: i === refs.length - 1
+        capEnd: i === ids.length - 1
       });
     });
   }
@@ -3717,14 +3864,23 @@ var VerseMarkersPlugin = class extends import_obsidian7.Plugin {
       const filePath = params["file"];
       if (!verse || !filePath)
         return;
-      const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (!(file instanceof import_obsidian7.TFile))
+      const exact = this.app.vault.getAbstractFileByPath(filePath);
+      const file = exact instanceof import_obsidian7.TFile ? exact : this.app.metadataCache.getFirstLinkpathDest(
+        (0, import_obsidian7.normalizePath)(filePath),
+        ""
+      );
+      if (!file) {
+        new import_obsidian7.Notice(`Note not found: ${filePath}`);
         return;
-      const parsed = parseVerseRefEndpoint(verse);
-      if (!parsed)
+      }
+      const ref = parseVerseRefEndpoint(verse);
+      if (!ref)
         return;
-      const fragment = `verse-${verse}`;
-      await resolveVerseLink(this.app, file, fragment);
+      const part = params["part"];
+      if (ref.number !== null && ref.part === null && part && /^[a-z]+$/.test(part)) {
+        ref.part = part;
+      }
+      await resolveVerseLink(this.app, file, verseRefToAnchorId(ref));
     });
   }
   onunload() {

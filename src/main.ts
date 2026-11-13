@@ -19,7 +19,7 @@
  * Multi-line verses and heading-split verses are supported natively — see
  * detection.ts for the canonical contract.
  */
-import { Plugin, TFile } from "obsidian";
+import { Notice, Plugin, TFile, normalizePath } from "obsidian";
 import { versePostProcessor, configureVerseMarkerDisplay } from "./postprocessor";
 import { registerCommands } from "./commands";
 import { resolveVerseLink, registerVerseLinkNavigation, registerVersePagePreview } from "./references";
@@ -33,7 +33,11 @@ import {
 } from "./highlightDismiss";
 import { registerNativeFlashPrevention } from "./nativeFlash";
 import { clearReadingViewHighlight } from "./references";
-import { clearFileIndexCache, parseVerseRefEndpoint } from "./detection";
+import {
+  clearFileIndexCache,
+  parseVerseRefEndpoint,
+  verseRefToAnchorId,
+} from "./detection";
 import {
   VerseMarkersSettings,
   DEFAULT_SETTINGS,
@@ -94,14 +98,38 @@ export default class VerseMarkersPlugin extends Plugin {
       const filePath = params["file"];
       if (!verse || !filePath) return;
 
-      const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (!(file instanceof TFile)) return;
+      // An exact vault path wins; otherwise resolve `file` the way Obsidian's
+      // own obsidian://open does — like a wiki-link, so a bare note name in
+      // any letter case (with or without .md) finds the note.
+      const exact = this.app.vault.getAbstractFileByPath(filePath);
+      const file =
+        exact instanceof TFile
+          ? exact
+          : this.app.metadataCache.getFirstLinkpathDest(
+              normalizePath(filePath),
+              ""
+            );
+      if (!file) {
+        new Notice(`Note not found: ${filePath}`);
+        return;
+      }
 
-      const parsed = parseVerseRefEndpoint(verse);
-      if (!parsed) return;
+      const ref = parseVerseRefEndpoint(verse);
+      if (!ref) return;
 
-      const fragment = `verse-${verse}`;
-      await resolveVerseLink(this.app, file, fragment);
+      // `verse` may carry the part itself ("5a"); the separate &part= is a
+      // convenience for the plain-number form (verse=5&part=a).
+      const part = params["part"];
+      if (
+        ref.number !== null &&
+        ref.part === null &&
+        part &&
+        /^[a-z]+$/.test(part)
+      ) {
+        ref.part = part;
+      }
+
+      await resolveVerseLink(this.app, file, verseRefToAnchorId(ref));
     });
   }
 
